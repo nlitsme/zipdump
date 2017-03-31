@@ -16,6 +16,7 @@ Usage:
 import sys
 import re
 from errno import EINVAL, ENOENT
+from os import SEEK_SET, SEEK_CUR, SEEK_END
 if sys.version_info[0] == 3:
     import urllib.request
     from urllib.request import Request
@@ -23,6 +24,10 @@ if sys.version_info[0] == 3:
 else:
     import urllib2
     from urllib2 import Request
+
+# add urlopen method to request object, so later we don't need
+# to explicitly know the name of the urllib2 module.
+Request.urlopen = urllib2.urlopen
 
 # set this to True when debugging this module
 debuglog = False
@@ -33,13 +38,22 @@ def open(url, mode=None):
 
     'mode' is ignored, it is there to be argument compatible with file.open()
     """
+
+    # support basic http authentication
+    m = re.match(r'(\w+://)([^/]+?)(?::([^/]+))?@(.*)', url)
+    if m:
+        url = m.group(1)+m.group(4)
+        authinfo = urllib2.HTTPPasswordMgrWithDefaultRealm()
+        authinfo.add_password(None, url, m.group(2), m.group(3))
+        urllib2.install_opener(urllib2.build_opener(urllib2.HTTPBasicAuthHandler(authinfo)))
+
     return urlstream(Request(url))
 
 
 class urlstream(object):
-    """ urlstream requests chunks from a web resource as directed by read + seek requests """
+    """ Urlstream requests chunks from a web resource as directed by read + seek requests """
     def __init__(self, req):
-
+        """ Construct a urlstream object given a urllib.Request object. """
         self.req = req
         self.absolutepos = 0
 
@@ -47,16 +61,16 @@ class urlstream(object):
         self.bufferstart = None    # position of start of buffer
 
     def clearrange(self):
-        """ remove Range header from request """
+        """ Remove Range header from request. """
         if hasattr(self.req, 'remove_header'):
             # python3
             self.req.remove_header('Range')
         else:
             # python2
-            self.req.headers.pop('Range',None)
+            self.req.headers.pop('Range', None)
 
     def next(self, size):
-        """ download next chunk """
+        """ Download next chunk. """
         # Retrieve anywhere between 64k and 1M byte
         if size is not None:
             size = min(max(size, 0x10000), 0x100000)
@@ -78,9 +92,9 @@ class urlstream(object):
 
         # note: Content-Range header has actual resulting range.
         # the format of the Content-Range header:
-        #  
+        #
         # Content-Range: bytes (\d+)-(\d+)/(\d+)
-        #  
+        #
         if self.absolutepos < 0:
             crange = f.headers.get('Content-Range')
             if crange:
@@ -88,10 +102,14 @@ class urlstream(object):
                 if m:
                     self.absolutepos = int(m.group(1))
 
+        if f.code==416:
+            # outside of content range -> return empty
+            return None
+
         return f.read()
 
     def read(self, size=None):
-        """ read bytes from stream """
+        """ Read bytes from stream. """
         if size is None:
             if self.absolutepos==0:
                 self.clearrange()
@@ -123,14 +141,14 @@ class urlstream(object):
 
         return data
 
-    def seek(self, size, whence=0):
-        """ seek to a different offset """
+    def seek(self, size, whence=SEEK_SET):
+        """ Seek to a different offset. """
         if debuglog: print("seek", size, whence)
-        if whence == 0 and size>=0:
+        if whence == SEEK_SET and size>=0:
             self.absolutepos = size
-        elif whence == 1:
+        elif whence == SEEK_CUR:
             self.absolutepos += size
-        elif whence == 2 and size<0:
+        elif whence == SEEK_END and size<0:
             self.absolutepos = size
         else:
             raise IOError(EINVAL, "Invalid seek arguments")
@@ -140,7 +158,7 @@ class urlstream(object):
             self.bufferstart = None
 
     def tell(self):
-        """ return current absolute position """
+        """ Return the current absolute position. """
         if self.absolutepos>=0:
             if debuglog: print("tell -> ", self.absolutepos)
             return self.absolutepos
@@ -151,11 +169,11 @@ class urlstream(object):
         if debuglog: print("tell: HEAD")
         self.clearrange()
 
-   
         try:
             head_response = self.doreq()
             result = head_response.getcode()
-        except urllib2.HTTPError as err:
+        except:
+            # restore get_method, irrespective of the type of error.
             self.req.get_method = saved_method
             raise
 
@@ -167,13 +185,17 @@ class urlstream(object):
         return self.absolutepos
 
     def doreq(self):
-        """ do the actual http request, translating 404 into ENOENT """
+        """ Do the actual http request, translating 404 into ENOENT. """
         try:
-            return urllib2.urlopen(self.req)
+#            return urllib2.urlopen(self.req)
+            return self.req.urlopen()
         except urllib2.HTTPError as err:
-            if err.code!=404:
-                raise
-            raise IOError(ENOENT, "Not found")
+            if err.code==404:
+                raise IOError(ENOENT, "Not found")
+            if err.code==416:
+                # outside of content range -> return empty
+                return err.fp
+            raise
 
     # for supporting 'with'
     def __enter__(self):
