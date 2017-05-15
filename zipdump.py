@@ -9,7 +9,6 @@ Analyze PKZIP file contents
 (C) 2016 Willem Hengeveld  <itsme@xs4all.nl>
 """
 
-## BUG: the ==> lines are at the wrong position in the output due to mixing of buffered and unbuffered stdout.
 from __future__ import division, print_function, absolute_import, unicode_literals
 import sys
 import os
@@ -434,10 +433,12 @@ def processfile(args, fh):
                 do_raw = checkarg(args.raw, ent)
                 do_save= checkarg(args.save, ent)
 
-                do_name= checkname(args.cat,args.raw)
+                do_name= checkname(args.cat, args.raw)
 
                 if do_name:
-                    sys.stdout.buffer.write(("\n===> " + ent.name + " <===\n").encode('utf-8'))
+                    print("\n===> " + ent.name + " <===\n")
+
+                sys.stdout.flush()
                 if do_cat:
                     sys.stdout.buffer.writelines(zipcat(fh, ent))
                 if do_raw:
@@ -520,11 +521,7 @@ def main():
     if args.FILES:
         for fn in EnumeratePaths(args, args.FILES):
 
-            if use_raw:
-                sys.stdout.buffer.write(("\n==> " + fn + " <==\n").encode('utf-8'))
-            else:
-                print("\n==> " + fn + " <==\n")
-
+            print("\n==> " + fn + " <==\n")
             try:
                 if fn.find("://") in (3,4,5):
                     # when argument looks like a url, use urlstream to open
