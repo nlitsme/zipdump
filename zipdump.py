@@ -22,6 +22,70 @@ if sys.version_info[0] == 2:
     os.scandir = scandir.scandir
 
 
+def zip_decrypt(data, pw):
+    """
+    INPUT: data  - an array of bytes
+           pw    - either a tuple of 3 dwords, or a byte array.
+    OUTPUT: a decrypted array of bytes.
+
+    The very weak 'zip' encryption
+
+    This encryption can be cracked using tools like pkcrack.
+    Pkcrack does a known plaintext attack, requiring 13 bytes of plaintext.
+    """
+    def make_crc_tab(poly):
+        def calcentry(v, poly):
+            for _ in range(8):
+                v = (v>>1) ^ (poly if v&1 else 0)
+            return v
+        return [ calcentry(byte, poly) for byte in range(256) ]
+
+    crctab = make_crc_tab(0xedb88320)
+
+    def crc32(crc, byte):
+        return crctab[(crc^byte)&0xff] ^ (crc>>8)
+
+    def updatekeys(keys, byte):
+        keys[0] = crc32(keys[0], byte)
+        keys[1] = ((keys[1] + (keys[0]&0xFF)) * 134775813 + 1)&0xFFFFFFFF
+        keys[2] = crc32(keys[2], keys[1]>>24)
+
+    keys = [ 0x12345678, 0x23456789, 0x34567890 ]
+    if type(pw)==list:
+        keys = pw
+    else:
+        for c in pw:
+            updatekeys(keys, c)
+
+    for blk in data:
+        u = bytearray()
+        for b in bytearray(blk):
+            xor = (keys[2] | 2)&0xFFFF
+            xor = ((xor * (xor^1))>>8) & 0xFF
+            b = b ^ xor
+            u.append(b)
+            updatekeys(keys, b)
+        yield u
+
+def skipbytes(blks, skip, args):
+    """
+    skip the first <skip> bytes of a stream of byte blocks.
+    """
+    skipped = b''
+    for blk in blks:
+        if skip >= len(blk):
+            skip -= len(blk)
+            skipped += blk
+        elif skip:
+            skipped += blk[:skip]
+            if args.verbose:
+                print("CRYPTHEADER: %s" % binascii.b2a_hex(skipped))
+                sys.stdout.flush()
+            yield blk[skip:]
+            skip = 0
+        else:
+            yield blk
+
 def decode_name(name):
     nonprint = set('\u0009\u000b\u000c\u001c\u001d\u001e\u001f\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2008\u2009\u200a\u2028\u2029\u205f\u3000')
     try:
@@ -38,6 +102,21 @@ class EntryBase(object):
         """ loads any items refered to by the header """
         pass
 
+def decodedatetime(ts):
+    def decode_date(dt):
+        if dt==0:
+            return datetime.datetime(1980,1,1)
+        year, mon, day = (dt>>9), (dt>>5)&15, dt&31
+        try:
+            return datetime.datetime(year+1980, mon, day)
+        except Exception as e:
+            print("error decoding date %d-%d-%d" % (year+1980, mon, day))
+            return datetime.datetime(1980,1,1)
+    def decode_time(tm):
+        hour, minute, bisecond = tm>>11, (tm>>5)&63, tm&31
+        return datetime.timedelta(hours=hour, minutes=minute, seconds=bisecond*2)
+
+    return decode_date(ts>>16) + decode_time(ts & 0xFFFF)
 
 ######################################################
 #  Decoder classes
@@ -87,7 +166,7 @@ class CentralDirEntry(EntryBase):
         return "%10d (%5.1f%%)  %s  %08x [%5s] %s" % (
                 self.originalSize,
                 100.0*self.compressedSize/self.originalSize if self.originalSize else 0,
-                datetime.datetime.utcfromtimestamp(self.timestamp),
+                decodedatetime(self.timestamp),
                 self.crc32,
                 flagdesc(self.flags),
                 self.name
@@ -101,8 +180,6 @@ class CentralDirEntry(EntryBase):
             self.nameOffset, self.extraOffset, self.commentOffset, self.endOffset)
         if self.name:
             r += " - " + self.name
-        if self.comment:
-            r += "\n" + self.comment
         return r
 
 
@@ -184,16 +261,12 @@ class EndOfCentralDir(EntryBase):
         else:
             r = "Spanned archive %d .. %d  ( %d of %d entries )" % (self.startDiskNr, self.thisDiskNr, self.thisEntries, self.totalEntries)
         r += ", %d byte directory" % self.dirSize
-        if self.comment:
-            r += "\n" + self.comment
         return r
 
     def __repr__(self):
         r = "PK.0506: %04x %04x %04x %04x %08x %08x %04x |  %08x %08x" % (
             self.thisDiskNr, self.startDiskNr, self.thisEntries, self.totalEntries, self.dirSize, self.dirOffset, self.commentLength,
             self.commentOffset, self.endOffset)
-        if self.comment:
-            r += "\n" + self.comment
         return r
 
 
@@ -309,6 +382,15 @@ def findPKHeaders(args, fh):
 def quickScanZip(args, fh):
     """ Do a quick scan of the .zip file, starting by locating the EOD marker. """
     # 100 bytes is the smallest .zip possible
+
+    fh.seek(0, 2)
+    fsize = fh.tell()
+    if fsize==0:
+        print("Empty file")
+        return
+    if fsize<100:
+        print("Zip too small: %d bytes, minimum zip is 100 bytes" % fsize)
+        return
     fh.seek(-100, 2)
 
     eoddata = fh.read()
@@ -359,21 +441,20 @@ def zipraw(fh, ent):
         yield block
         nread += len(block)
 
-def rawdump(fh, ent):
-    o = 0
-    for blk in zipraw(fh, ent):
-        print("%08x: %s" % (o, b2a_hex(blk)))
+def blockdump(baseofs, blks):
+    o = baseofs
+    for blk in blks:
+        print("%08x: %s" % (o, binascii.b2a_hex(blk)))
         o += len(blk)
 
-def zipcat(fh, ent):
-    rawdata = zipraw(fh, ent)
+def zipcat(blks, ent):
     if ent.method==8:
         C = zlib.decompressobj(-15)
-        for block in rawdata:
+        for block in blks:
             yield C.decompress(block)
         yield C.flush()
     elif ent.method==0:
-        yield from rawdata
+        yield from blks
     else:
         print("unknown compression method")
 
@@ -405,6 +486,10 @@ def savefile(outdir, name, data):
     with open(path, "wb") as fh:
         fh.writelines(data)
 
+def getbytes(fh, ofs, size):
+    fh.seek(ofs)
+    return fh.read(size)
+    
 def processfile(args, fh):
     """ Process one opened file / url. """
     if args.quick:
@@ -424,6 +509,9 @@ def processfile(args, fh):
         if b: l += len(b)
         return l > 1
 
+    if args.verbose:
+        print("   0304            need flgs  mth    stamp  --crc-- compsize fullsize nlen xlen      namofs     xofs   datofs   endofs")
+        print("   0102            crea need flgs  mth    stamp  --crc-- compsize fullsize nlen xlen clen dsk0 attr osattr     datptr      namofs     xofs   cmtofs   endofs")
     for ent in scanner:
         if args.cat or args.raw or args.save:
             if args.quick and isinstance(ent, CentralDirEntry)  or \
@@ -439,20 +527,33 @@ def processfile(args, fh):
                     print("\n===> " + ent.name + " <===\n")
 
                 sys.stdout.flush()
+                blks = zipraw(fh, ent)
+
+                if args.password and ent.flags&1:
+                    blks = zip_decrypt(blks, args.password)
+                    if do_cat or do_save:
+                        blks = skipbytes(blks, 12, args)
+
                 if do_cat:
-                    sys.stdout.buffer.writelines(zipcat(fh, ent))
+                    sys.stdout.buffer.writelines(zipcat(blks, ent))
                 if do_raw:
-                    sys.stdout.buffer.writelines(zipraw(fh, ent))
+                    sys.stdout.buffer.writelines(blks)
                 if do_save:
-                    savefile(args.outputdir, ent.name, zipcat(fh, ent))
+                    savefile(args.outputdir, ent.name, zipcat(blks, ent))
         else:
             ent.loaditems(fh)
             if args.verbose or not args.quick:
                 print("%08x: %s" % (ent.pkOffset, ent))
             else:
                 print(ent.summary())
+                if hasattr(args.comment) and not args.dumpraw:
+                    print(args.comment)
+            if args.dumpraw and hasattr(ent, "extraLength"):
+                print("%08x: XTRA: %s" % (ent.extraOffset, binascii.b2a_hex(getbytes(fh, ent.extraOffset, ent.extraLength))))
+            if args.dumpraw and hasattr(ent, "comment") and ent.comment:
+                print("%08x: CMT: %s" % (ent.commentOffset, binascii.b2a_hex(getbytes(fh, ent.commentOffset, ent.commentLength))))
             if args.dumpraw and isinstance(ent, LocalFileHeader):
-                rawdump(fh, ent)
+                blockdump(ent.dataOffset, zipraw(fh, ent))
 
 
 def DirEnumerator(args, path):
@@ -502,6 +603,7 @@ def main():
     parser = argparse.ArgumentParser(description='zipdump - scan file contents for PKZIP data',
                                      epilog='zipdump can quickly scan a zip from an URL without downloading the complete archive')
     parser.add_argument('--verbose', '-v', action='count')
+    parser.add_argument('--quiet', action='store_true')
     parser.add_argument('--cat', '-c', nargs='*', type=str, help='decompress file(s) to stdout')
     parser.add_argument('--raw', '-p', nargs='*', type=str, help='print raw compressed file(s) data to stdout')
     parser.add_argument('--save', '-s', nargs='*', type=str, help='extract file(s) to the output directory')
@@ -513,15 +615,28 @@ def main():
     parser.add_argument('--length', '-l', type=int, help='max length of data to process')
     parser.add_argument('--chunksize', type=int, default=1024*1024)
     parser.add_argument('--dumpraw', action='store_true', help='hexdump raw compressed data')
+
+    parser.add_argument('--password', type=str, help="Password for pkzip decryption")
+    parser.add_argument('--hexpassword', type=str, help="hexadecimal password for pkzip decryption")
+    parser.add_argument('--keys', type=str, help="internal key representation for pkzip decryption")
+
     parser.add_argument('FILES', type=str, nargs='*', help='Files or URLs')
     args = parser.parse_args()
 
     use_raw = args.cat or args.raw or args.save
 
+    if args.hexpassword:
+        args.password = a2b_hex(args.hexpassword)
+    elif args.keys:
+        args.password = list(int(_, 0) for _ in args.keys.split(","))
+    elif args.password:
+        args.password = args.password.encode('utf-8')
+
     if args.FILES:
         for fn in EnumeratePaths(args, args.FILES):
 
-            print("\n==> " + fn + " <==\n")
+            if len(args.FILES)>1 and not args.quiet:
+                print("\n==> " + fn + " <==\n")
             try:
                 if fn.find("://") in (3,4,5):
                     # when argument looks like a url, use urlstream to open
