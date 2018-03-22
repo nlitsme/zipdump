@@ -509,7 +509,7 @@ def processfile(args, fh):
         if b: l += len(b)
         return l > 1
 
-    if args.verbose:
+    if args.verbose and not (args.cat or args.raw or args.save):
         print("   0304            need flgs  mth    stamp  --crc-- compsize fullsize nlen xlen      namofs     xofs   datofs   endofs")
         print("   0102            crea need flgs  mth    stamp  --crc-- compsize fullsize nlen xlen clen dsk0 attr osattr     datptr      namofs     xofs   cmtofs   endofs")
     for ent in scanner:
@@ -546,8 +546,8 @@ def processfile(args, fh):
                 print("%08x: %s" % (ent.pkOffset, ent))
             else:
                 print(ent.summary())
-                if hasattr(args.comment) and not args.dumpraw:
-                    print(args.comment)
+                if hasattr(ent, "comment") and ent.comment and not args.dumpraw:
+                    print(ent.comment)
             if args.dumpraw and hasattr(ent, "extraLength"):
                 print("%08x: XTRA: %s" % (ent.extraOffset, binascii.b2a_hex(getbytes(fh, ent.extraOffset, ent.extraLength))))
             if args.dumpraw and hasattr(ent, "comment") and ent.comment:
@@ -626,7 +626,7 @@ def main():
     use_raw = args.cat or args.raw or args.save
 
     if args.hexpassword:
-        args.password = a2b_hex(args.hexpassword)
+        args.password = binascii.a2b_hex(args.hexpassword)
     elif args.keys:
         args.password = list(int(_, 0) for _ in args.keys.split(","))
     elif args.password:
