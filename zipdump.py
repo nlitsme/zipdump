@@ -548,12 +548,16 @@ def processfile(args, fh):
                 print(ent.summary())
                 if hasattr(ent, "comment") and ent.comment and not args.dumpraw:
                     print(ent.comment)
-            if args.dumpraw and hasattr(ent, "extraLength"):
+            if args.dumpraw and hasattr(ent, "extraLength") and ent.extraLength:
                 print("%08x: XTRA: %s" % (ent.extraOffset, binascii.b2a_hex(getbytes(fh, ent.extraOffset, ent.extraLength))))
             if args.dumpraw and hasattr(ent, "comment") and ent.comment:
                 print("%08x: CMT: %s" % (ent.commentOffset, binascii.b2a_hex(getbytes(fh, ent.commentOffset, ent.commentLength))))
             if args.dumpraw and isinstance(ent, LocalFileHeader):
-                blockdump(ent.dataOffset, zipraw(fh, ent))
+                blks = zipraw(fh, ent)
+                if args.password and ent.flags&1:
+                    blks = zip_decrypt(blks, args.password)
+
+                blockdump(ent.dataOffset, blks)
 
 
 def DirEnumerator(args, path):
