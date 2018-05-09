@@ -21,6 +21,9 @@ if sys.version_info[0] == 3:
     import urllib.request
     from urllib.request import Request
     urllib2 = urllib.request
+
+    import urllib.parse
+    urllib2.quote = urllib.parse.quote
 else:
     import urllib2
     from urllib2 import Request
@@ -47,7 +50,15 @@ def open(url, mode=None):
         authinfo.add_password(None, url, m.group(2), m.group(3))
         urllib2.install_opener(urllib2.build_opener(urllib2.HTTPBasicAuthHandler(authinfo)))
 
-    return urlstream(Request(url))
+    # todo: only re-encode when the url does not have '%xx' chars in it.
+    m = re.match(r'^(\S+?://)(.*?)(\?.*)?$', url)
+    if not m:
+        print("unrecognized url: %s" % url)
+        return
+    method = m.group(1)
+    basepath = urllib2.quote(m.group(2))
+    query = m.group(3) or ""
+    return urlstream(Request(method + basepath + query))
 
 
 class urlstream(object):
@@ -59,6 +70,9 @@ class urlstream(object):
 
         self.buffer = None
         self.bufferstart = None    # position of start of buffer
+
+        if debuglog:
+            print("URL: %s" % req.get_full_url())
 
     def clearrange(self):
         """ Remove Range header from request. """
@@ -89,6 +103,8 @@ class urlstream(object):
         if debuglog: print("next: ", self.req.headers['Range'])
 
         f = self.doreq()
+        if debuglog:
+            print(f.headers)
 
         # note: Content-Range header has actual resulting range.
         # the format of the Content-Range header:
@@ -115,6 +131,8 @@ class urlstream(object):
                 self.clearrange()
                 if debuglog: print("read: entire file")
                 f = self.doreq()
+                if debuglog:
+                    print(f.headers)
                 return f.read()
 
             # read until end of file
@@ -148,7 +166,7 @@ class urlstream(object):
             self.absolutepos = size
         elif whence == SEEK_CUR:
             self.absolutepos += size
-        elif whence == SEEK_END and size<0:
+        elif whence == SEEK_END and size<=0:
             self.absolutepos = size
         else:
             raise IOError(EINVAL, "Invalid seek arguments")
@@ -159,7 +177,7 @@ class urlstream(object):
 
     def tell(self):
         """ Return the current absolute position. """
-        if self.absolutepos>=0:
+        if self.absolutepos>0:
             if debuglog: print("tell -> ", self.absolutepos)
             return self.absolutepos
 
@@ -171,6 +189,8 @@ class urlstream(object):
 
         try:
             head_response = self.doreq()
+            if debuglog:
+                print(head_response.headers)
             result = head_response.getcode()
         except:
             # restore get_method, irrespective of the type of error.
@@ -185,7 +205,11 @@ class urlstream(object):
         return self.absolutepos
 
     def doreq(self):
-        """ Do the actual http request, translating 404 into ENOENT. """
+        """
+        Do the actual http request, translating 404 into ENOENT.
+
+        returns a httplib.HTTPResponse object
+        """
         try:
 #            return urllib2.urlopen(self.req)
             return self.req.urlopen()
@@ -193,6 +217,8 @@ class urlstream(object):
             if err.code==404:
                 raise IOError(ENOENT, "Not found")
             if err.code==416:
+                if debuglog:
+                    print("status 416")
                 # outside of content range -> return empty
                 return err.fp
             raise
