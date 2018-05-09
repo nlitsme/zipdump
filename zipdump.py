@@ -52,7 +52,7 @@ def zip_decrypt(data, pw):
 
     keys = [ 0x12345678, 0x23456789, 0x34567890 ]
     if type(pw)==list:
-        keys = pw
+        keys = pw.copy()
     else:
         for c in pw:
             updatekeys(keys, c)
@@ -441,11 +441,21 @@ def zipraw(fh, ent):
         yield block
         nread += len(block)
 
-def blockdump(baseofs, blks):
+def blockdump(baseofs, blks, limit):
     o = baseofs
+    if limit:
+        e = baseofs + limit
+    else:
+        e = None
     for blk in blks:
-        print("%08x: %s" % (o, binascii.b2a_hex(blk)))
+        want = o+len(blk)
+        if e and want>e:
+            want = e
+        print("%08x: %s" % (o, binascii.b2a_hex(blk[:want])))
         o += len(blk)
+
+        if e and o >= e:
+            break
 
 def zipcat(blks, ent):
     if ent.method==8:
@@ -555,9 +565,11 @@ def processfile(args, fh):
             if args.dumpraw and isinstance(ent, LocalFileHeader):
                 blks = zipraw(fh, ent)
                 if args.password and ent.flags&1:
+                    blks = list(blks)    # change generator into a list
+                    blockdump(ent.dataOffset, blks, args.limit)
                     blks = zip_decrypt(blks, args.password)
 
-                blockdump(ent.dataOffset, blks)
+                blockdump(ent.dataOffset, blks, args.limit)
 
 
 def DirEnumerator(args, path):
@@ -608,6 +620,7 @@ def main():
                                      epilog='zipdump can quickly scan a zip from an URL without downloading the complete archive')
     parser.add_argument('--verbose', '-v', action='count')
     parser.add_argument('--quiet', action='store_true')
+    parser.add_argument('--debug', action='store_true')
     parser.add_argument('--cat', '-c', nargs='*', type=str, help='decompress file(s) to stdout')
     parser.add_argument('--raw', '-p', nargs='*', type=str, help='print raw compressed file(s) data to stdout')
     parser.add_argument('--save', '-s', nargs='*', type=str, help='extract file(s) to the output directory')
@@ -619,6 +632,7 @@ def main():
     parser.add_argument('--length', '-l', type=int, help='max length of data to process')
     parser.add_argument('--chunksize', type=int, default=1024*1024)
     parser.add_argument('--dumpraw', action='store_true', help='hexdump raw compressed data')
+    parser.add_argument('--limit', type=str, help='limit raw dump output')
 
     parser.add_argument('--password', type=str, help="Password for pkzip decryption")
     parser.add_argument('--hexpassword', type=str, help="hexadecimal password for pkzip decryption")
@@ -628,6 +642,9 @@ def main():
     args = parser.parse_args()
 
     use_raw = args.cat or args.raw or args.save
+
+    if args.limit:
+        args.limit = int(args.limit, 0)
 
     if args.hexpassword:
         args.password = binascii.a2b_hex(args.hexpassword)
@@ -652,7 +669,8 @@ def main():
                         processfile(args, fh)
             except Exception as e:
                 print("ERROR: %s" % e)
-                raise
+                if args.debug:
+                    raise
     else:
         processfile(args, sys.stdin.buffer)
 
