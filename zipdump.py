@@ -288,6 +288,9 @@ class EndOfCentralDir(EntryBase):
 
         self.comment = None
 
+    def size(self):
+        return self.HeaderSize + self.commentLength + 4
+
     def loaditems(self, fh):
         if not self.commentLength:
             return
@@ -470,11 +473,19 @@ def quickScanZip(args, fh):
             print("expected PK0506 - probably not a PKZIP file")
             return
     else:
-        ofs = fh.tell()-0x100
+        ofs = fh.tell()-100
     eod = EndOfCentralDir(ofs, eoddata, iEND+4)
     yield eod
 
-    dirofs = eod.dirOffset
+    fh.seek(0, 2)
+    filesize = fh.tell()
+
+    if eod.dirOffset + eod.dirSize != eod.pkOffset:
+        print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
+    if eod.endOffset != filesize:
+        print("Extra data after EOD marker: 0x%x bytes" % (filesize - eod.endOffset))
+
+    dirofs = eod.pkOffset - eod.dirSize
     for _ in range(eod.thisEntries):
         fh.seek(dirofs)
         dirdata = fh.read(46)
@@ -572,17 +583,13 @@ def processfile(args, fh):
     else:
         scanner = findPKHeaders(args, fh)
 
-    def checkarg(arg, ent):
-        if not arg:
+    def checkarg(arglist, ent):
+        """
+        Returns true when 'ent' is in arglist, or when arglist contains a wildcard.
+        """
+        if not arglist:
             return False
-        return '*' in arg or  ent.name in arg
-    def checkname(a, b):
-        if a and '*' in a: return True
-        if b and '*' in b: return True
-        l = 0
-        if a: l += len(a)
-        if b: l += len(b)
-        return l > 1
+        return '*' in arglist or  ent.name in arglist
 
     if args.verbose and not (args.cat or args.raw or args.save):
         print("   0304            need flgs  mth    stamp  --crc-- compsize fullsize nlen xlen      namofs     xofs   datofs   endofs")
@@ -596,9 +603,7 @@ def processfile(args, fh):
                 do_raw = checkarg(args.raw, ent)
                 do_save= checkarg(args.save, ent)
 
-                do_name= checkname(args.cat, args.raw)
-
-                if do_name:
+                if do_cat or do_raw:
                     print("\n===> " + ent.name + " <===\n")
 
                 sys.stdout.flush()
@@ -683,14 +688,32 @@ def EnumeratePaths(args, paths):
 
 def main():
     import argparse
+
+    class MultipleOptions(argparse.Action):
+        """
+        Helper class for supporting multiple options of the same name with argparse.
+
+            --xyz ARG1  --xyz ARG2
+
+        will result in an array value args.xyz = [ 'AGRG1', 'ARG2' ]
+        """
+        def __init__(self, option_strings, dest, nargs=None, **kwargs):
+            super(MultipleOptions, self).__init__(option_strings, dest, **kwargs)
+        def __call__(self, parser, namespace, values, option_string=None):
+            arr = getattr(namespace, self.dest)
+            if arr is None:
+                arr = []
+                setattr(namespace, self.dest, arr)
+            arr.append( values )
+ 
     parser = argparse.ArgumentParser(description='zipdump - scan file contents for PKZIP data',
                                      epilog='zipdump can quickly scan a zip from an URL without downloading the complete archive')
     parser.add_argument('--verbose', '-v', action='count')
     parser.add_argument('--quiet', action='store_true')
     parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--cat', '-c', nargs='*', type=str, help='decompress file(s) to stdout')
-    parser.add_argument('--raw', '-p', nargs='*', type=str, help='print raw compressed file(s) data to stdout')
-    parser.add_argument('--save', '-s', nargs='*', type=str, help='extract file(s) to the output directory')
+    parser.add_argument('--cat', '-c', type=str, action=MultipleOptions, help='decompress file(s) to stdout')
+    parser.add_argument('--raw', '-p', type=str, action=MultipleOptions, help='print raw compressed file(s) data to stdout')
+    parser.add_argument('--save', '-s', type=str, action=MultipleOptions, help='extract file(s) to the output directory')
     parser.add_argument('--outputdir', '-d', type=str, help='the output directory, default = curdir', default='.')
     parser.add_argument('--quick', '-q', action='store_true', help='Quick dir scan. This is quick with URLs as well.')
     parser.add_argument('--recurse', '-r', action='store_true', help='recurse into directories')
