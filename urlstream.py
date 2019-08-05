@@ -136,7 +136,9 @@ class urlstream(object):
                 return f.read()
 
             # read until end of file
-            return self.next(None)
+            data = self.next(None)
+            self.absolutepos += len(data)
+            return data
 
         # read chunk until size bytes received
         data = b""
