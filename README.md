@@ -10,7 +10,7 @@ I wrote this tool because i wanted to look at the contents of lots of apple ios 
 
 For instance:
 
-    python zipdump.py -q http://appldnld.apple.com/ios10.0/031-64655-20160705-A371AD14-3E3F-11E6-A58B-C84C60941A1E/com_apple_MobileAsset_SoftwareUpdate/d75e3af423ae0308a8b9e0847292375ba02e3b11.zip
+    python3 zipdump.py -q http://appldnld.apple.com/ios10.0/031-64655-20160705-A371AD14-3E3F-11E6-A58B-C84C60941A1E/com_apple_MobileAsset_SoftwareUpdate/d75e3af423ae0308a8b9e0847292375ba02e3b11.zip
   
 `zipdump` needs pyton3.
 
