@@ -451,7 +451,7 @@ def quickScanZip(args, fh):
     """ Do a quick scan of the .zip file, starting by locating the EOD marker. """
     # 100 bytes is the smallest .zip possible
 
-    fh.seek(0, 2)
+    fh.seek(0, os.SEEK_END)
     fsize = fh.tell()
     if fsize==0:
         print("Empty file")
@@ -459,14 +459,14 @@ def quickScanZip(args, fh):
     if fsize<100:
         print("Zip too small: %d bytes, minimum zip is 100 bytes" % fsize)
         return
-    fh.seek(-100, 2)
+    fh.seek(-100, os.SEEK_END)
 
     eoddata = fh.read()
     iEND = eoddata.find(b'PK\x05\x06')
     if iEND==-1:
         # try with larger chunk
         ofs = max(fh.tell()-0x10100, 0)
-        fh.seek(ofs, 0)
+        fh.seek(ofs, os.SEEK_SET)
         eoddata = fh.read()
         iEND = eoddata.find(b'PK\x05\x06')
         if iEND==-1:
@@ -477,13 +477,18 @@ def quickScanZip(args, fh):
     eod = EndOfCentralDir(ofs, eoddata, iEND+4)
     yield eod
 
-    fh.seek(0, 2)
+    fh.seek(0, os.SEEK_END)
     filesize = fh.tell()
 
-    if eod.dirOffset + eod.dirSize != eod.pkOffset:
+    if eod.dirOffset + eod.dirSize < eod.pkOffset:
         print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
-    if eod.endOffset != filesize:
+    elif eod.dirOffset + eod.dirSize > eod.pkOffset:
+        print("Strange: directory overlaps with the EOD marker by %d bytes" % ((eod.dirOffset + eod.dirSize) - eod.pkOffset))
+
+    if eod.endOffset < filesize:
         print("Extra data after EOD marker: 0x%x bytes" % (filesize - eod.endOffset))
+    elif eod.endOffset > filesize:
+        print("Strange: EOD marker after EOF" % (eod.endOffset - filesize))
 
     dirofs = eod.pkOffset - eod.dirSize
     for _ in range(eod.thisEntries):
