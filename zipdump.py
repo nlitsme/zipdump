@@ -118,6 +118,7 @@ def decodedatetime(ts):
 
     return decode_date(ts>>16) + decode_time(ts & 0xFFFF)
 
+
 ######################################################
 #  Decoder classes
 ######################################################
@@ -128,6 +129,8 @@ class CentralDirEntry(EntryBase):
 
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
+
+        # createVersion has the OS in the high byte, 0 = dos/win, 3 = unix
 
         self.createVersion, self.neededVersion, self.flags, self.method, self.timestamp, \
             self.crc32, self.compressedSize, self.originalSize, self.nameLength, self.extraLength, \
@@ -158,17 +161,54 @@ class CentralDirEntry(EntryBase):
         fh.seek(self.commentOffset)
         self.comment = fh.read(self.commentLength).decode("utf-8", "ignore")
 
+    def flagdesc(self, simple=False):
+        # &8: localheader crc, size, usize are zero in localfileheader.
+        # &32:  compressed patched data
+
+        flags = { 1: "CRYPT", 8: "ZEROLFH", 32:"PATCH", 64:"AES" }
+
+        testedflags = 0
+        l = []
+
+        # check single bit flags
+        for flag, name in flags.items():
+            if self.flags & flag:
+                if simple:
+                    return v
+                testedflags |= flag
+                l.append(v)
+
+        # compression mode
+        #
+        # method == 6:
+        # &2: 1=8k dict, 0=4k dict
+        # &4: 1=3 shannon trees, 0=2 shannon trees
+
+        # method == 8, 9:
+        # &6
+        #  0: Normal (-en) compression option was used.
+        #  2: Maximum (-exx/-ex) compression option was used.
+        #  4: Fast (-ef) compression option was used.
+        #  6: Super Fast (-es) compression option was used.
+
+        # method == 14 ( lzma)
+        # &2: EOS marker present
+        if self.flags & 6:
+            testedflags |= 6
+            l.append("CMODE%x" % (self.flags&6)>>1)
+
+        # remaining flags
+        if self.flags & ~testedflags:
+            l.append("UNK_%x" % (self.flags & ~testedflags))
+        return "+".join(l)
+
     def summary(self):
-        def flagdesc(fl):
-            if fl&64: return "AES"
-            if fl&1: return "CRYPT"
-            return ""
         return "%10d (%5.1f%%)  %s  %08x [%5s] %s" % (
                 self.originalSize,
                 100.0*self.compressedSize/self.originalSize if self.originalSize else 0,
                 decodedatetime(self.timestamp),
                 self.crc32,
-                flagdesc(self.flags),
+                self.flagdesc(simple=True),
                 self.name
                 )
 
@@ -186,7 +226,7 @@ class CentralDirEntry(EntryBase):
         r = "PK.0102: %s\n" % self.__class__.__name__
         r += "\tversion made by:        %04x\n" % self.createVersion
         r += "\tversion needed to extr: %04x\n" % self.neededVersion
-        r += "\tflags:                  %04x\n" % self.flags
+        r += "\tflags:                  %04x - %s\n" % (self.flags, self.flagdesc())
         r += "\tcompression:            %04x\n" % self.method
         r += "\ttime & date:            %08x\n" % self.timestamp
         r += "\tcrc-32:                 %08x\n" % self.crc32
@@ -206,6 +246,24 @@ class CentralDirEntry(EntryBase):
         r += "\t" + self.comment + "\n" if self.comment else "\n"
         r += "\tend offset              %08x\n" % self.endOffset
         return r
+
+    def havetimes(self):
+        return True
+    def havemode(self):
+        return True
+    def get_atime(self):
+        # TODO: extract from XTRA field
+        return self.get_mtime()
+    def get_mtime(self):
+        return decodedatetime(self.timestamp).timestamp()
+    def get_mode(self):
+        return self.osAttrs >> 16
+
+
+    def isdir(self):
+        # for unix: upper 16 bits contain file perms.
+        # lower 16 bits: 0 for regular, 16 for directory
+        return (self.osAttrs & 65535) == 16
  
 
 class LocalFileHeader(EntryBase):
@@ -268,6 +326,22 @@ class LocalFileHeader(EntryBase):
         r += "\tdata offset:            %08x\n" % self.dataOffset
         r += "\tend offset:             %08x\n" % self.endOffset
         return r
+
+    def havetimes(self):
+        return (self.flags & 8) == 0
+    def havemode(self):
+        return False
+    def get_atime(self):
+        # TODO: extract from XTRA field
+        return self.get_mtime()
+    def get_mtime(self):
+        return decodedatetime(self.timestamp).timestamp()
+    def get_mode(self):
+        return None
+
+    def isdir(self):
+        # determine if this is an entry for a directory heuristically
+        return self.crc32 == 0 and self.name.endswith('/')
  
 
 class EndOfCentralDir(EntryBase):
@@ -568,14 +642,19 @@ def namegenerator(name):
     for i in itertools.count(1):
         yield "%s-%d%s" % (part0, i, part1)
 
-def savefile(outdir, name, data):
-    os.makedirs(os.path.dirname(os.path.join(outdir, name)), exist_ok=True)
+def savefile(args, ent, name, data):
+    os.makedirs(os.path.dirname(os.path.join(args.outputdir, name)), exist_ok=True)
     for namei in namegenerator(name):
-        path = os.path.join(outdir, namei)
+        path = os.path.join(args.outputdir, namei)
         if not os.path.exists(path):
             break
     with open(path, "wb") as fh:
         fh.writelines(data)
+    if args.preserve and ent.havetimes():
+        os.utime(path, (ent.get_atime(), ent.get_mtime()))
+    if args.preserve and ent.havemode():
+        os.chmod(path, ent.get_mode())
+
 
 def getbytes(fh, ofs, size):
     fh.seek(ofs)
@@ -600,7 +679,14 @@ def processfile(args, fh):
         print("   0304            need flgs  mth    stamp  --crc-- compsize fullsize nlen xlen      namofs     xofs   datofs   endofs")
         print("   0102            crea need flgs  mth    stamp  --crc-- compsize fullsize nlen xlen clen dsk0 attr osattr     datptr      namofs     xofs   cmtofs   endofs")
     for ent in scanner:
-        if args.cat or args.raw or args.save:
+        if args.cat or args.raw or args.save or args.extract:
+
+            #
+            # in 'quick' mode, use CentralDirEntry,
+            # in 'full scan' mode, use LocalFileHeader.
+            #  --> some problems with this: sometimes the lfh has only dummy values.
+            #  and the lfh does not know if it is a directory.
+            #
             if args.quick and isinstance(ent, CentralDirEntry)  or \
                         not args.quick and isinstance(ent, LocalFileHeader):
                 ent.loaditems(fh)
@@ -624,7 +710,14 @@ def processfile(args, fh):
                 if do_raw:
                     sys.stdout.buffer.writelines(blks)
                 if do_save:
-                    savefile(args.outputdir, ent.name, zipcat(blks, ent))
+                    savefile(args, ent, ent.name, zipcat(blks, ent))
+
+                if args.extract and not ent.isdir():
+                    savename = ent.name
+                    if args.strip:
+                        f = ent.name.split('/')
+                        savename = '/'.join(f[args.strip:])
+                    savefile(args, ent, savename, zipcat(blks, ent))
         else:
             ent.loaditems(fh)
             if args.pretty:
@@ -716,11 +809,14 @@ def main():
     parser.add_argument('--verbose', '-v', action='count')
     parser.add_argument('--quiet', action='store_true')
     parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--cat', '-c', type=str, action=MultipleOptions, help='decompress file(s) to stdout')
-    parser.add_argument('--raw', '-p', type=str, action=MultipleOptions, help='print raw compressed file(s) data to stdout')
-    parser.add_argument('--save', '-s', type=str, action=MultipleOptions, help='extract file(s) to the output directory')
+    parser.add_argument('--cat', '-c', type=str, action=MultipleOptions, help='decompress file to stdout')
+    parser.add_argument('--raw', '-p', type=str, action=MultipleOptions, help='print raw compressed file data to stdout')
+    parser.add_argument('--save', '-s', type=str, action=MultipleOptions, help='extract file to the output directory')
     parser.add_argument('--outputdir', '-d', type=str, help='the output directory, default = curdir', default='.')
+    parser.add_argument('--extract', '-e', action='store_true', help='Extract all files')
+    parser.add_argument('--strip', '-j', type=int, help='strip N initial parts from pathnames before saving')
     parser.add_argument('--quick', '-q', action='store_true', help='Quick dir scan. This is quick with URLs as well.')
+    parser.add_argument('--preserve', '-P',  action='store_true', help="preserve permissions and timestamps")
     parser.add_argument('--recurse', '-r', action='store_true', help='recurse into directories')
     parser.add_argument('--skiplinks', '-L', action='store_true', help='skip symbolic links')
     parser.add_argument('--offset', '-o', type=int, help='start processing at offset')
