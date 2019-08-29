@@ -123,7 +123,55 @@ def decodedatetime(ts):
 #  Decoder classes
 ######################################################
 
-class CentralDirEntry(EntryBase):
+class FileEntryBase(EntryBase):
+    def flagdesc(self, simple=False):
+        # &8: localheader crc, size, usize are zero in localfileheader.
+        # &32:  compressed patched data
+
+        flags = { 1: "CRYPT", 8: "NOLFH", 32:"PATCH", 64:"AES" }
+
+        testedflags = 0
+        l = []
+
+        # check single bit flags
+        for flag, name in flags.items():
+            if self.flags & flag:
+                if simple:
+                    return name
+                testedflags |= flag
+                l.append(name)
+
+        # compression mode
+        #
+        # method == 6:
+        # &2: 1=8k dict, 0=4k dict
+        # &4: 1=3 shannon trees, 0=2 shannon trees
+
+        # method == 8, 9:
+        # &6
+        #  0: Normal (-en) compression option was used.
+        #  2: Maximum (-exx/-ex) compression option was used.
+        #  4: Fast (-ef) compression option was used.
+        #  6: Super Fast (-es) compression option was used.
+
+        # method == 14 ( lzma)
+        # &2: EOS marker present
+        if self.flags & 6:
+            testedflags |= 6
+            l.append("CMODE%x" % (self.flags&6)>>1)
+
+        # remaining flags
+        if self.flags & ~testedflags:
+            l.append("UNK_%x" % (self.flags & ~testedflags))
+        return "+".join(l)
+    def get_atime(self):
+        # TODO: extract from XTRA field
+        return self.get_mtime()
+    def get_mtime(self):
+        return decodedatetime(self.timestamp).timestamp()
+
+
+class CentralDirEntry(FileEntryBase):
     HeaderSize = 42
     MagicNumber = b'\x01\x02'
 
@@ -161,46 +209,6 @@ class CentralDirEntry(EntryBase):
         fh.seek(self.commentOffset)
         self.comment = fh.read(self.commentLength).decode("utf-8", "ignore")
 
-    def flagdesc(self, simple=False):
-        # &8: localheader crc, size, usize are zero in localfileheader.
-        # &32:  compressed patched data
-
-        flags = { 1: "CRYPT", 8: "ZEROLFH", 32:"PATCH", 64:"AES" }
-
-        testedflags = 0
-        l = []
-
-        # check single bit flags
-        for flag, name in flags.items():
-            if self.flags & flag:
-                if simple:
-                    return v
-                testedflags |= flag
-                l.append(v)
-
-        # compression mode
-        #
-        # method == 6:
-        # &2: 1=8k dict, 0=4k dict
-        # &4: 1=3 shannon trees, 0=2 shannon trees
-
-        # method == 8, 9:
-        # &6
-        #  0: Normal (-en) compression option was used.
-        #  2: Maximum (-exx/-ex) compression option was used.
-        #  4: Fast (-ef) compression option was used.
-        #  6: Super Fast (-es) compression option was used.
-
-        # method == 14 ( lzma)
-        # &2: EOS marker present
-        if self.flags & 6:
-            testedflags |= 6
-            l.append("CMODE%x" % (self.flags&6)>>1)
-
-        # remaining flags
-        if self.flags & ~testedflags:
-            l.append("UNK_%x" % (self.flags & ~testedflags))
-        return "+".join(l)
 
     def summary(self):
         return "%10d (%5.1f%%)  %s  %08x [%5s] %s" % (
@@ -226,7 +234,7 @@ class CentralDirEntry(EntryBase):
         r = "PK.0102: %s\n" % self.__class__.__name__
         r += "\tversion made by:        %04x\n" % self.createVersion
         r += "\tversion needed to extr: %04x\n" % self.neededVersion
-        r += "\tflags:                  %04x - %s\n" % (self.flags, self.flagdesc())
+        r += "\tflags:                  %04x - [%s]\n" % (self.flags, self.flagdesc())
         r += "\tcompression:            %04x\n" % self.method
         r += "\ttime & date:            %08x\n" % self.timestamp
         r += "\tcrc-32:                 %08x\n" % self.crc32
@@ -251,11 +259,6 @@ class CentralDirEntry(EntryBase):
         return True
     def havemode(self):
         return True
-    def get_atime(self):
-        # TODO: extract from XTRA field
-        return self.get_mtime()
-    def get_mtime(self):
-        return decodedatetime(self.timestamp).timestamp()
     def get_mode(self):
         return self.osAttrs >> 16
 
@@ -266,7 +269,9 @@ class CentralDirEntry(EntryBase):
         return (self.osAttrs & 65535) == 16
  
 
-class LocalFileHeader(EntryBase):
+
+
+class LocalFileHeader(FileEntryBase):
     HeaderSize = 26
     MagicNumber = b'\x03\x04'
 
@@ -312,7 +317,7 @@ class LocalFileHeader(EntryBase):
     def reprPretty(self):
         r = "PK.0304: %s\n" % self.__class__.__name__
         r += "\tversion needed to extr: %04x\n" % self.neededVersion
-        r += "\tflags:                  %04x\n" % self.flags
+        r += "\tflags:                  %04x - [%s]\n" % (self.flags, self.flagdesc())
         r += "\tcompression:            %04x\n" % self.method
         r += "\ttime & date:            %08x\n" % self.timestamp
         r += "\tcrc-32:                 %08x\n" % self.crc32
@@ -331,11 +336,6 @@ class LocalFileHeader(EntryBase):
         return (self.flags & 8) == 0
     def havemode(self):
         return False
-    def get_atime(self):
-        # TODO: extract from XTRA field
-        return self.get_mtime()
-    def get_mtime(self):
-        return decodedatetime(self.timestamp).timestamp()
     def get_mode(self):
         return None
 
@@ -343,6 +343,8 @@ class LocalFileHeader(EntryBase):
         # determine if this is an entry for a directory heuristically
         return self.crc32 == 0 and self.name.endswith('/')
  
+
+
 
 class EndOfCentralDir(EntryBase):
     HeaderSize = 18
