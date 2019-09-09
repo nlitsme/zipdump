@@ -15,8 +15,13 @@ For instance:
 `zipdump` needs pyton3.
 
 
+Or you could extract a specific file from lots of zips using:
+
+    cat urllist | xargs zipdump -q --cat somefile.txt
+
 COMMANDLINE OPTIONS
 ===================
+
  * `--cat` FILENAME    will decrypt, decompress the specified filename to stdout
  * `--raw` FILENAME    will decrypt, but not decompress the specified filename to stdout
  * `--save` FILENAME   will save the decrypted, decompressed file to the output directory
@@ -24,10 +29,44 @@ COMMANDLINE OPTIONS
  * `--quick`           will quickly scan a file, without investigating the entire file.
  * `--offset OFS --length SIZE`   specify a chunk of a file to investigate
     you can used this to list zip contents from a zip file embeded in another binary file.
- * `--dumpraw`         hexdump the entire zip file contents.
+ * `--dumpraw`         hexdump the entire zip file contents, optionally limiting the amount of data printed.
+   * `--limit LIMIT`     limit raw dump output
  * `--keys  0x1,0x2,0x3`  specify the internal encryption key for decrypting encrypted files.
  * `--password  PASSWD `  specify the password for decrypting encrypted files.
  * `--hexpassword  HEXPASSWD `  specify the password for decrypting encrypted files.
     useful when the password is not an ascii string.
+
+ * `--extract`         Extract all files to the `outputdir`, optionally stripping leading parts of the filename
+   * `--strip STRIP`     strip N initial parts from pathnames before saving
+   * `--preserve`        preserve permissions and timestamps
+
+When searching for .zip files, you can recurse and skip links using these options:
+ * `--recurse`         recurse into directories
+ * `--skiplinks`       skip symbolic links
+
+The zip file is read in `chunksize` chunks, default 1M, you can alter this using the `--chunksize` option.
+
+Then there are several options controlling how much output is generated:
+ * `--pretty`          very verbose output
+ * `--verbose`
+ * `--quiet`
+ * `--debug`
+
+
+
+
+TODO
+====
+
+ * add option to save a specific entry by index, or offset into the file.
+ * add option to save an entry by name to a differently named file.
+ * by default sanitize filenames before use, with option to disable sanitation.
+ * currently XTRA is printed only when specifying --dumpraw, i would like to see this
+   parsed and printed with --verbose.
+ * rename pretty to 'very verbose'
+ * add option to save each file to a zipfile specific subdirectory. So you can extract
+   multiple files in one command.
+
+
 
 (c) 2016 Willem Hengeveld <itsme@xs4all.nl>
