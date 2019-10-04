@@ -97,10 +97,28 @@ def decode_name(name):
     return "hex-%s" % binascii.b2a_hex(name)
 
 class EntryBase(object):
-    """ base class for PK headers """
+    """
+    Base class for PK headers
+
+    subclasses are supposed to add fields:
+      - HeaderSize
+      - MagicNumber
+    Methods subclasses are required to implement:
+     - __repr__()
+     - reprPretty()
+    Optional methods:
+     - summary()
+     - loaditems(fh)
+
+    also, each object gets fields:
+     - pkOffset  - file offset to 'PK' signature
+     - endOffset - file offset to end of this item.
+    """
     def loaditems(self, fh):
         """ loads any items refered to by the header """
         pass
+    def summary(self):
+        return ""
 
 def decodedatetime(ts):
     def decode_date(dt):
@@ -124,6 +142,12 @@ def decodedatetime(ts):
 ######################################################
 
 class FileEntryBase(EntryBase):
+    """
+    FileEntryBase is the base class for CentralDirEntry's and
+    LocalFileHeader's
+
+    it provides fucntions for decoding flags and timestamps.
+    """
     def flagdesc(self, simple=False):
         # &8: localheader crc, size, usize are zero in localfileheader.
         # &32:  compressed patched data
@@ -158,7 +182,7 @@ class FileEntryBase(EntryBase):
         # &2: EOS marker present
         if self.flags & 6:
             testedflags |= 6
-            l.append("CMODE%x" % (self.flags&6)>>1)
+            l.append("CMODE%x" % ((self.flags&6)>>1))
 
         # remaining flags
         if self.flags & ~testedflags:
@@ -169,6 +193,30 @@ class FileEntryBase(EntryBase):
         return self.get_mtime()
     def get_mtime(self):
         return decodedatetime(self.timestamp).timestamp()
+    def processExtra(self):
+        o = 0
+        while o+4 <= self.extraLength:
+            tag, size = struct.unpack_from("<HH", self.extra, o)
+            o += 4
+            e = o + size
+            if tag == 1:
+                # zip64
+                if self.originalSize == 0xFFFFFFFF:
+                    self.originalSize64, = struct.unpack_from("<Q", self.extra, o)
+                    o += 8
+                if self.compressedSize == 0xFFFFFFFF:
+                    self.compressedSize64, = struct.unpack_from("<Q", self.extra, o)
+                    o += 8
+            o = e
+
+    def getOriginalSize(self):
+        # todo: get from extra.zip64 field
+        return self.originalSize64 or rself.originalSize
+    def getCompressedSize(self):
+        # todo: get from extra.zip64 field
+        return self.compressedSize64 or self.compressedSize
+
+
 
 
 class CentralDirEntry(FileEntryBase):
@@ -178,6 +226,8 @@ class CentralDirEntry(FileEntryBase):
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
 
+        self.compressedSize64 = None
+        self.originalSize64 = None
         # createVersion has the OS in the high byte, 0 = dos/win, 3 = unix
 
         self.createVersion, self.neededVersion, self.flags, self.method, self.timestamp, \
@@ -208,7 +258,7 @@ class CentralDirEntry(FileEntryBase):
         self.extra = fh.read(self.extraLength)
         fh.seek(self.commentOffset)
         self.comment = fh.read(self.commentLength).decode("utf-8", "ignore")
-
+        self.processExtra()
 
     def summary(self):
         return "%10d (%5.1f%%)  %s  %08x [%5s] %s" % (
@@ -250,6 +300,7 @@ class CentralDirEntry(FileEntryBase):
         r += "\tfile name offset        %08x" % self.nameOffset
         r += " - " + self.name + "\n" if self.name else "\n"
         r += "\textra field offset      %08x\n" % self.extraOffset
+        r += "\t\t%s\n" % binascii.b2a_hex(self.extra)
         r += "\tcomment offset          %08x" % self.commentOffset
         r += "\t" + self.comment + "\n" if self.comment else "\n"
         r += "\tend offset              %08x\n" % self.endOffset
@@ -278,6 +329,9 @@ class LocalFileHeader(FileEntryBase):
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
 
+        self.compressedSize64 = None
+        self.originalSize64 = None
+
         self.neededVersion, self.flags, self.method, self.timestamp, self.crc32, \
             self.compressedSize, self.originalSize, self.nameLength, self.extraLength = \
             struct.unpack_from("<3H4LHH", data, ofs)
@@ -290,7 +344,7 @@ class LocalFileHeader(FileEntryBase):
         ofs += self.extraLength
 
         self.dataOffset = baseofs + ofs
-        ofs += self.compressedSize
+        ofs += self.compressedSize      #### TODO unknown for zip64 until extra info is read.
 
         self.endOffset = baseofs + ofs
 
@@ -304,6 +358,9 @@ class LocalFileHeader(FileEntryBase):
         fh.seek(self.extraOffset)
         self.extra = fh.read(self.extraLength)
         # not loading data
+
+        self.processExtra()
+
 
     def __repr__(self):
         r = "PK.0304: %04x %04x %04x %08x %08x %08x %08x %04x %04x |  %08x %08x %08x %08x" % (
@@ -321,13 +378,14 @@ class LocalFileHeader(FileEntryBase):
         r += "\tcompression:            %04x\n" % self.method
         r += "\ttime & date:            %08x\n" % self.timestamp
         r += "\tcrc-32:                 %08x\n" % self.crc32
-        r += "\tcompressed size:        %08x\n" % self.compressedSize
-        r += "\toriginal size:          %08x\n" % self.originalSize
+        r += "\tcompressed size:        %08x%s\n" % (self.compressedSize, " (%010x)" % self.compressedSize64 if self.compressedSize64 is not None else "")
+        r += "\toriginal size:          %08x%s\n" % (self.originalSize,   " (%010x)" % self.originalSize64 if self.originalSize64 is not None else "")
         r += "\tname length:            %04x\n" % self.nameLength
         r += "\textra field length:     %04x\n" % self.extraLength
         r += "\tname offset:            %08x" % self.nameOffset
         r += " - " + self.name + "\n" if self.name else "\n"
         r += "\textra offset:           %08x\n" % self.extraOffset
+        r += "\t\t%s\n" % binascii.b2a_hex(self.extra)
         r += "\tdata offset:            %08x\n" % self.dataOffset
         r += "\tend offset:             %08x\n" % self.endOffset
         return r
@@ -338,12 +396,9 @@ class LocalFileHeader(FileEntryBase):
         return False
     def get_mode(self):
         return None
-
     def isdir(self):
         # determine if this is an entry for a directory heuristically
         return self.crc32 == 0 and self.name.endswith('/')
- 
-
 
 
 class EndOfCentralDir(EntryBase):
@@ -353,7 +408,7 @@ class EndOfCentralDir(EntryBase):
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
 
-        self.thisDiskNr, self.startDiskNr, self.thisEntries, self.totalEntries, self.dirSize, self.dirOffset, self.commentLength = \
+        self.thisDiskId, self.dirDiskIdStart, self.thisDiskNrEntries, self.totalNrEntries, self.dirSize, self.dirOffset, self.commentLength = \
             struct.unpack_from("<4HLLH", data, ofs)
         ofs += self.HeaderSize
 
@@ -378,25 +433,25 @@ class EndOfCentralDir(EntryBase):
             self.comment = self.comment.decode('utf-8', 'ignore')
 
     def summary(self):
-        if self.thisEntries==self.totalEntries:
-            r = "EOD: %d entries" % (self.totalEntries)
+        if self.thisDiskNrEntries==self.totalNrEntries:
+            r = "EOD: %d entries" % (self.totalNrEntries)
         else:
-            r = "Spanned archive %d .. %d  ( %d of %d entries )" % (self.startDiskNr, self.thisDiskNr, self.thisEntries, self.totalEntries)
+            r = "Spanned archive %d .. %d  ( %d of %d entries )" % (self.dirDiskIdStart, self.thisDiskId, self.thisDiskNrEntries, self.totalNrEntries)
         r += ", %d byte directory" % self.dirSize
         return r
 
     def __repr__(self):
         r = "PK.0506: %04x %04x %04x %04x %08x %08x %04x |  %08x %08x" % (
-            self.thisDiskNr, self.startDiskNr, self.thisEntries, self.totalEntries, self.dirSize, self.dirOffset, self.commentLength,
+            self.thisDiskId, self.dirDiskIdStart, self.thisDiskNrEntries, self.totalNrEntries, self.dirSize, self.dirOffset, self.commentLength,
             self.commentOffset, self.endOffset)
         return r
 
     def reprPretty(self):
         r = "PK.0506: %s\n" % self.__class__.__name__
-        r += "\tdisk number:             %04x\n" % self.thisDiskNr
-        r += "\tcentral dir disk number: %04x\n" % self.startDiskNr
-        r += "\tcentral dir entries:     %04x\n" % self.thisEntries
-        r += "\ttotal entries:           %04x\n" % self.totalEntries
+        r += "\tdisk number:             %04x\n" % self.thisDiskId
+        r += "\tcentral dir disk number: %04x\n" % self.dirDiskIdStart
+        r += "\tcentral dir entries:     %04x\n" % self.thisDiskNrEntries
+        r += "\ttotal entries:           %04x\n" % self.totalNrEntries
         r += "\tcentral dir size:        %08x\n" % self.dirSize
         r += "\tcentral dir offset:      %08x\n" % self.dirOffset
         r += "\tcomment length:          %04x\n" % self.commentLength
@@ -409,6 +464,8 @@ class EndOfCentralDir(EntryBase):
 class DataDescriptor(EntryBase):
     HeaderSize = 12
     MagicNumber = b'\x07\x08'
+
+    # NOTE: conflict with disk spanning marker
 
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
@@ -433,50 +490,187 @@ class DataDescriptor(EntryBase):
         return r
 
 
-# todo
 class Zip64EndOfDir(EntryBase):
-    HeaderSize = 0
+    HeaderSize = 52
     MagicNumber = b'\x06\x06'
 
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
+        (
+            self.hdrsize,
+            self.versionMadeBy,
+            self.versionNeeded,
+            self.thisDiskId,
+            self.dirDiskIdStart,
+            self.thisDiskNrEntries,
+            self.totalNrEntries,
+            self.dirSize,
+            self.dirOffset,
+        ) = struct.unpack_from("<QHHLLQQQQ", data, ofs)
 
+        # TODO: if versionMadeBy >= 62
+        #  -> v2 header
+        #  2 bytes          Compression Method        Method used to compress the Central Directory
+        #  8 bytes          Compressed Size           Size of the compressed data
+        #  8 bytes          Original   Size           Original uncompressed size
+        #  2 bytes          AlgId                     Encryption algorithm ID
+        #  2 bytes          BitLen                    Encryption key length
+        #  2 bytes          Flags                     Encryption flags
+        #  2 bytes          HashID                    Hash algorithm identifier
+        #  2 bytes          Hash Length               Length of hash data
+        #  (variable)       Hash Data                 Hash data
+
+        ofs += self.HeaderSize
+        self.extensibleOffset = baseofs + ofs
+        self.extensibleData = data[ofs:ofs + self.hdrsize-(self.HeaderSize-8)]
+
+        ofs += self.hdrsize-(self.HeaderSize-8)
+
+        self.endOffset = baseofs + ofs
+
+    def summary(self):
+        if self.thisDiskNrEntries==self.totalNrEntries:
+            r = "EOD64: %d entries" % (self.totalNrEntries)
+        else:
+            r = "Spanned archive %d .. %d  ( %d of %d entries )" % (self.dirDiskIdStart, self.thisDiskId, self.thisDiskNrEntries, self.totalNrEntries)
+        r += ", %d byte directory" % self.dirSize
+        return r
+
+
+    def __repr__(self):
+        return "PK.0606: %010x %04x %04x %4d/%4d %010x %010x %010x %010x | %010x %010x" % (
+            self.hdrsize,
+            self.versionMadeBy,
+            self.versionNeeded,
+            self.thisDiskId,
+            self.dirDiskIdStart,
+            self.thisDiskNrEntries,
+            self.totalNrEntries,
+            self.dirSize,
+            self.dirOffset,
+            self.extensibleOffset,
+            self.endOffset,
+        )
+    def reprPretty(self):
+        r = "PK.0606: %s\n" % self.__class__.__name__
+        r += "\tHeader size:                %08x\n" %  self.hdrsize
+        r += "\tVersion Made:               %04x\n" %  self.versionMadeBy
+        r += "\tVersion Needed:             %04x\n" %  self.versionNeeded
+        r += "\tdisk number:                %04x\n" %  self.thisDiskId
+        r += "\tcentral dir disk number:    %04x\n" %  self.dirDiskIdStart
+        r += "\tthis central dir nr entries:%08x\n" %  self.thisDiskNrEntries
+        r += "\tcentral dir total entries:  %08x\n" %  self.totalNrEntries
+        r += "\tcentral dir size:           %08x\n" %  self.dirSize
+        r += "\tcentral dir offset:         %010x\n" % self.dirOffset
+        return r
 
 class Zip64EndOfDirLocator(EntryBase):
-    HeaderSize = 0
+    HeaderSize = 16
     MagicNumber = b'\x06\x07'
 
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
+        (
+            self.eodDiskId,
+            self.eodOffset,
+            self.nrOfDisks,
+        ) = struct.unpack_from("<LQL", data, ofs)
+        ofs += self.HeaderSize
+        self.endOffset = baseofs + ofs
+    def summary(self):
+        return "LOC64 (%d of %d) -> 0x%010x" % (self.eodDiskId, self.nrOfDisks, self.eodOffset)
 
+    def __repr__(self):
+        return "PK.0607: %08x %010x %08x |  %08x" % (
+            self.eodDiskId, self.eodOffset, self.nrOfDisks,
+            self.endOffset)
 
-class ExtraEntry(EntryBase):
-    HeaderSize = 0
+    def reprPretty(self):
+        r = "PK.0607: %s\n" % self.__class__.__name__
+        r += "\tEOD64 disk number: %04x\n" % self.eodDiskId
+        r += "\tEOD64 offset:      %010x\n" % self.EODOffset
+        r += "\tEOD64 total disks: %04x\n" % self.nrOfDisks
+        return r
+
+class ArchiveExtraDataEntry(EntryBase):
+    HeaderSize = 4
     MagicNumber = b'\x06\x08'
 
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
+        self.size, = struct.unpack_from("<L", data, ofs)
+        ofs += self.HeaderSize
 
+        self.field = data[ofs:ofs+self.size]
+        ofs += self.size
 
-class SpannedArchive(EntryBase):
+        self.endOffset = baseofs + ofs
+
+    def __repr__(self):
+        return "PK.0806 %02x  | %08x" % (self.size, self.endOffset)
+    def reprPretty(self):
+        r = "PK.0806: %s\n" % self.__class__.__name__
+        r += "\tsize  : %04x\n" % self.size
+        r += "\tfield : %s\n" % binascii.b2a_hex(self.field)
+        return r
+
+class SingleSpannedArchiveMarker(EntryBase):
     HeaderSize = 0
-    MagicNumber = b'\x03\x03'
+    MagicNumber = b'\x07\x08'
 
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
+        self.endOffset = self.pkOffset + 4
+    def __repr__(self):
+        return "PK.3030"
+    def reprPretty(self):
+        r = "PK.3030: %s\n" % self.__class__.__name__
+        return r
+
+class SpannedArchiveMarker(EntryBase):
+    HeaderSize = 0
+    MagicNumber = b'\x30\x30'
+
+    def __init__(self, baseofs, data, ofs):
+        self.pkOffset = baseofs + ofs - 4
+        self.endOffset = self.pkOffset + 4
+    def __repr__(self):
+        return "PK.3030"
+    def reprPretty(self):
+        r = "PK.3030: %s\n" % self.__class__.__name__
+        return r
+
 
 
 class ArchiveSignature(EntryBase):
-    HeaderSize = 0
+    HeaderSize = 2
     MagicNumber = b'\x05\x05'
 
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
+        self.size, = struct.unpack_from("<H", data, ofs)
+        ofs += self.HeaderSize
+        self.signature = data[ofs:ofs+self.size]
+        ofs += self.size
+        self.endOffset = baseofs + ofs
+    def __repr__(self):
+        return "PK.0505 %02x  | %08x" % (self.size, self.endOffset)
+    def reprPretty(self):
+        r = "PK.0505: %s\n" % self.__class__.__name__
+        r += "\tsize  : %04x\n" % self.size
+        r += "\tsig   : %s\n" % binascii.b2a_hex(self.signature)
+        return r
 
 
 def getDecoderClass(typ):
     """ Return Decoder class for the PK type. """
-    for cls in (CentralDirEntry, LocalFileHeader, EndOfCentralDir, DataDescriptor, Zip64EndOfDir, Zip64EndOfDirLocator, ExtraEntry, SpannedArchive, ArchiveSignature):
+    for cls in (CentralDirEntry, LocalFileHeader, EndOfCentralDir, DataDescriptor, Zip64EndOfDir, Zip64EndOfDirLocator, ArchiveExtraDataEntry, ArchiveSignature, ):
+        if cls.MagicNumber == typ:
+            return cls
+
+def getMarkerClass(typ):
+    """ Return Marker class for the PK type. """
+    for cls in (SpannedArchiveMarker, SingleSpannedArchiveMarker, ):
         if cls.MagicNumber == typ:
             return cls
 
@@ -501,6 +695,10 @@ def findPKHeaders(args, fh):
                 #    continue
 
                 yield cls(o, chunk, n+4)
+            elif n+10 <= len(chunk):
+                if chunk[n+6:n+8] == b'PK' and getDecoderClass(chunk[n+8:n+10]):
+                    cls = getMarkerClass(chunk[n+2:n+4])
+                    yield cls(o, chunk, n+4)
 
     prev = b''
     o = 0
@@ -528,49 +726,89 @@ def quickScanZip(args, fh):
     # 100 bytes is the smallest .zip possible
 
     fh.seek(0, os.SEEK_END)
-    fsize = fh.tell()
-    if fsize==0:
+    filesize = fh.tell()
+    if filesize==0:
         print("Empty file")
         return
-    if fsize<100:
-        print("Zip too small: %d bytes, minimum zip is 100 bytes" % fsize)
+    if filesize<100:
+        print("Zip too small: %d bytes, minimum zip is 100 bytes" % filesize)
         return
-    fh.seek(-100, os.SEEK_END)
 
+    # always keep 'eoddata' and 'ofs'  consistent.
+    #   ofs is the absolute file position where eoddata was read from.
+
+    # read last 120 bytes of the file.
+    ofs = max(filesize-120, 0)
+    fh.seek(ofs, os.SEEK_END)
     eoddata = fh.read()
-    iEND = eoddata.find(b'PK\x05\x06')
+
+    iEND = eoddata.find(b'PK'+EndOfCentralDir.MagicNumber)
     if iEND==-1:
         # try with larger chunk
-        ofs = max(fh.tell()-0x10100, 0)
+        # 0x10000 + 0x200 = max eod + filecomment + zip64 locator size
+        ofs = max(filesize-0x10200, 0)
         fh.seek(ofs, os.SEEK_SET)
         eoddata = fh.read()
-        iEND = eoddata.find(b'PK\x05\x06')
+
+        iEND = eoddata.find(b'PK'+EndOfCentralDir.MagicNumber)
         if iEND==-1:
             print("expected PK0506 - probably not a PKZIP file")
             return
-    else:
-        ofs = fh.tell()-100
+
     eod = EndOfCentralDir(ofs, eoddata, iEND+4)
     yield eod
 
-    fh.seek(0, os.SEEK_END)
-    filesize = fh.tell()
-
-    if eod.dirOffset + eod.dirSize < eod.pkOffset:
-        print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
-    elif eod.dirOffset + eod.dirSize > eod.pkOffset:
-        print("Strange: directory overlaps with the EOD marker by %d bytes" % ((eod.dirOffset + eod.dirSize) - eod.pkOffset))
+    if eod.dirOffset != 0xFFFFFFFF:
+        if eod.dirOffset + eod.dirSize < eod.pkOffset:
+            print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
+        elif eod.dirOffset + eod.dirSize > eod.pkOffset:
+            print("Strange: directory overlaps with the EOD marker by %d bytes" % ((eod.dirOffset + eod.dirSize) - eod.pkOffset))
 
     if eod.endOffset < filesize:
         print("Extra data after EOD marker: 0x%x bytes" % (filesize - eod.endOffset))
     elif eod.endOffset > filesize:
-        print("Strange: EOD marker after EOF" % (eod.endOffset - filesize))
+        print("Strange: EOD marker after EOF: 0x%x" % (eod.endOffset - filesize))
+
+    # we found 'eod32.pkOffset'
+    #   when eod32.cdir_ofs != -1
+    #     --> eod32.pkOffset - oed32.cdir_size  == dirent[0].pkOffset
+    #     --> eod32.cdir_ofs - dirent[0].pkOffset   is the nr of extra bytes at the start of the file.
+    #
+    #   otherwise:
+    #    loc64.pkOffset = eod32.pkOffset - 20
+    #    loc64.eod_ofs  is only useful when we assume 0 extra bytes before the file.
+    #    eod64.pkOffset - eod64.cdir_size == eod64.cdir_ofs
+    if eod.dirOffset == 0xFFFFFFFF:
+        #print("o=%x, i=%x : %s" % (ofs, iEND, binascii.b2a_hex(eoddata)))
+
+        if eoddata[iEND-20:iEND-16] != b'PK'+Zip64EndOfDirLocator.MagicNumber:
+            print("WARNING: did not find zip64 locator - %s" % binascii.b2a_hex(eoddata[iEND-20:iEND-16]))
+            return
+        loc64 = Zip64EndOfDirLocator(ofs, eoddata, iEND-20+4)
+        yield loc64
+
+        # now try to find the eod64 record.
+        if loc64.eodOffset < ofs:
+            # need more data
+            ofs = loc64.eodOffset
+            endofs = 0
+            fh.seek(ofs, os.SEEK_SET)
+            eoddata = fh.read()
+        else:
+            endofs = loc64.eodOffset - ofs
+
+        if eoddata[endofs:endofs+4] != b'PK'+Zip64EndOfDir.MagicNumber:
+            print("WARNING: did not find zip64 eod - %s" % binascii.b2a_hex(eoddata[endofs:endofs+4]))
+            return
+
+        eod = Zip64EndOfDir(ofs, eoddata, endofs+4)
+        yield eod
 
     dirofs = eod.pkOffset - eod.dirSize
-    for _ in range(eod.thisEntries):
+    for _ in range(eod.thisDiskNrEntries):
         fh.seek(dirofs)
         dirdata = fh.read(46)
-        if dirdata[:4] != b'PK\x01\x02':
+        if dirdata[:4] != b'PK' + CentralDirEntry.MagicNumber:
             print("expected PK0102")
             return
         dirent = CentralDirEntry(dirofs, dirdata, 4)
@@ -590,8 +828,8 @@ def zipraw(fh, ent):
 
     fh.seek(ent.dataOffset)
     nread = 0
-    while nread < ent.compressedSize:
-        want = min(ent.compressedSize-nread, 0x10000)
+    while nread < ent.getCompressedSize():
+        want = min(ent.getCompressedSize()-nread, 0x10000)
         block = fh.read(want)
         if len(block)==0:
             break
