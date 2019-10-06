@@ -96,6 +96,11 @@ def decode_name(name):
         pass
     return "hex-%s" % binascii.b2a_hex(name)
 
+def cvWinNTTime(nttime):
+    # convert 1601-01-01  .1usec epoch to  1970-01-01 1.0sec epoch
+    nttime /= 10000000
+    return nttime - 11644473600
+
 class EntryBase(object):
     """
     Base class for PK headers
@@ -148,6 +153,11 @@ class FileEntryBase(EntryBase):
 
     it provides fucntions for decoding flags and timestamps.
     """
+    def __init__(self):
+        self.atime = None
+        self.mtime = None
+        self.ctime = None
+
     def flagdesc(self, simple=False):
         # &8: localheader crc, size, usize are zero in localfileheader.
         # &32:  compressed patched data
@@ -189,31 +199,137 @@ class FileEntryBase(EntryBase):
             l.append("UNK_%x" % (self.flags & ~testedflags))
         return "+".join(l)
     def get_atime(self):
-        # TODO: extract from XTRA field
-        return self.get_mtime()
+        return self.atime or self.get_mtime()
+    def get_ctime(self):
+        return self.ctime or self.get_mtime()
+
     def get_mtime(self):
-        return decodedatetime(self.timestamp).timestamp()
+        return self.mtime or decodedatetime(self.timestamp).timestamp()
+
+    def updateTimes(self, mtime, atime, ctime):
+        if atime:
+            self.atime = datetime.datetime.fromtimestamp(atime)
+        if mtime:
+            self.mtime = datetime.datetime.fromtimestamp(mtime)
+        if ctime:
+            self.ctime = datetime.datetime.fromtimestamp(ctime)
+
     def processExtra(self):
         o = 0
         while o+4 <= self.extraLength:
             tag, size = struct.unpack_from("<HH", self.extra, o)
             o += 4
             e = o + size
-            if tag == 1:
-                # zip64
-                if self.originalSize == 0xFFFFFFFF:
-                    self.originalSize64, = struct.unpack_from("<Q", self.extra, o)
-                    o += 8
-                if self.compressedSize == 0xFFFFFFFF:
-                    self.compressedSize64, = struct.unpack_from("<Q", self.extra, o)
-                    o += 8
+            if tag == 1: # zip64
+                self.parseZip64(self.extra[o:e])
+            elif tag == 10: # NTFS
+                self.parseNtfs(self.extra[o:e])
+            elif tag == 0x4453: # WinNT binary ACL
+                pass
+            elif tag == 0x5455: # extended timestamp
+                self.parseTimestamp(self.extra[o:e])
+            elif tag == 0x7855: # unix uid, gid
+                self.parseUnixUID(self.extra[o:e])
+            elif tag == 0x7875: # unix uid, gid
+                self.parseUnixUIDNew(self.extra[o:e])
+            elif tag == 0x5855: # info-zip unix
+                self.parseInfoZip(self.extra[o:e])
             o = e
+    def parseUnixUID(self, data):
+        uid = gid = None
+        o = 0
+        if o == 0:
+            return
+        if o<4:
+            print("WARNING: UnixUID: not enough data")
+            return
+        uid, gid = struct.unpack_from("<HH", data, 0)
+    def parseUnixUIDNew(self, data):
+        flag, = struct.unpack_from("<B", data, 0)
+        uid = gid = None
+        o = 1
+        i = 0
+        while o < len(data):
+            l, = struct.unpack_from("<B", data, o)
+            o += 1
+            if l==1:
+                fmt = "<B"
+            elif l==2:
+                fmt = "<H"
+            elif l==4:
+                fmt = "<L"
+            elif l==8:
+                fmt = "<!"
+            else:
+                print("WARNING: unknown uid size")
+            value, = struct.unpack_from(fmt, data, o)
+            o += l
+            if i==0:
+                uid = value
+            elif i==1:
+                gid = value
+            else:
+                print("WARNING: too many uid values")
+            i += 1
+        pass
+    def parseTimestamp(self, data):
+        atime = mtime = ctime = None
+        flags, = struct.unpack_from("<B", data, 0)
+        o = 1
+        if flags&1:
+            mtime, = struct.unpack_from("<L", data, o)
+            o += 4
+            if o==len(data): return
+        if flags&2:
+            atime, = struct.unpack_from("<L", data, o)
+            o += 4
+            if o==len(data): return
+        if flags&4:
+            ctime, = struct.unpack_from("<L", data, o)
+            o += 4
+            if o==len(data): return
+        # TODO: use m, a, c time
+        self.updateTimes(mtime, atime, ctime)
+
+    def parseInfoZip(self, data):
+        atime = mtime = ctime = None
+        if len(data)<8:
+            print("WARNING: infozip data < 8 bytes")
+            return
+        atime, mtime = struct.unpack_from("<LL", data, 0)
+        # TODO: use atime, mtime
+        self.updateTimes(mtime, atime, ctime)
+
+    def parseNtfs(self, data):
+        atime = mtime = ctime = None
+        o = 0
+        while o < len(data):
+            tag, size = struct.unpack_from("<HH", data, o)
+            o += 4
+            if tag == 1:
+                if size != 0x18:
+                    print("WARNING: expected NTFS tag#1 of size 24")
+                mtime, atime, ctime = struct.unpack_from("<QQQ", data, o)
+                # TODO: set m, a, c time
+                self.updateTimes(cvWinNTTime(mtime), cvWinNTTime(atime), cvWinNTTime(ctime))
+            o += size
+    def parseZip64(self, data):
+        o = 0
+        # zip64
+        if self.originalSize == 0xFFFFFFFF:
+            if o+8 > len(data):
+                print("WARNING: not enough data for origsize64")
+            self.originalSize64, = struct.unpack_from("<Q", data, o)
+            o += 8
+        if self.compressedSize == 0xFFFFFFFF:
+            if o+8 > len(data):
+                print("WARNING: not enough data for compsize64")
+            self.compressedSize64, = struct.unpack_from("<Q", data, o)
+            o += 8
 
     def getOriginalSize(self):
-        # todo: get from extra.zip64 field
         return self.originalSize64 or rself.originalSize
     def getCompressedSize(self):
-        # todo: get from extra.zip64 field
         return self.compressedSize64 or self.compressedSize
 
 
@@ -230,10 +346,24 @@ class CentralDirEntry(FileEntryBase):
         self.originalSize64 = None
         # createVersion has the OS in the high byte, 0 = dos/win, 3 = unix
 
-        self.createVersion, self.neededVersion, self.flags, self.method, self.timestamp, \
-            self.crc32, self.compressedSize, self.originalSize, self.nameLength, self.extraLength, \
-            self.commentLength, self.diskNrStart, self.zipAttrs, self.osAttrs, self.dataOfs = \
-            struct.unpack_from("<4H4L5HLL", data, ofs)
+        (
+            self.createVersion,
+            self.neededVersion,
+            self.flags,
+            self.method,
+            self.timestamp,
+            self.crc32,
+            self.compressedSize,
+            self.originalSize,
+            self.nameLength,
+            self.extraLength,
+            self.commentLength,
+            self.diskNrStart,
+            self.zipAttrs,
+            self.osAttrs,
+            self.dataOfs 
+        ) = struct.unpack_from("<4H4L5HLL", data, ofs)
+
         ofs += self.HeaderSize
 
         self.nameOffset = baseofs + ofs
@@ -332,9 +462,17 @@ class LocalFileHeader(FileEntryBase):
         self.compressedSize64 = None
         self.originalSize64 = None
 
-        self.neededVersion, self.flags, self.method, self.timestamp, self.crc32, \
-            self.compressedSize, self.originalSize, self.nameLength, self.extraLength = \
-            struct.unpack_from("<3H4LHH", data, ofs)
+        (
+            self.neededVersion,
+            self.flags,
+            self.method,
+            self.timestamp,
+            self.crc32,
+            self.compressedSize,
+            self.originalSize,
+            self.nameLength,
+            self.extraLength 
+        ) = struct.unpack_from("<3H4LHH", data, ofs)
         ofs += self.HeaderSize
 
         self.nameOffset = baseofs + ofs
@@ -344,9 +482,12 @@ class LocalFileHeader(FileEntryBase):
         ofs += self.extraLength
 
         self.dataOffset = baseofs + ofs
-        ofs += self.compressedSize      #### TODO unknown for zip64 until extra info is read.
+        if self.compressedSize != 0xFFFFFFFF:
+            ofs += self.compressedSize      #### TODO unknown for zip64 until extra info is read.
 
-        self.endOffset = baseofs + ofs
+            self.endOffset = baseofs + ofs
+        else:
+            self.endOffset = None
 
         self.name = None
         self.extra = None
@@ -360,6 +501,9 @@ class LocalFileHeader(FileEntryBase):
         # not loading data
 
         self.processExtra()
+
+        if self.compressedSize == 0xFFFFFFFF:
+            self.endOffset = self.dataOffset + self.getCompressedSize()
 
 
     def __repr__(self):
@@ -408,8 +552,15 @@ class EndOfCentralDir(EntryBase):
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
 
-        self.thisDiskId, self.dirDiskIdStart, self.thisDiskNrEntries, self.totalNrEntries, self.dirSize, self.dirOffset, self.commentLength = \
-            struct.unpack_from("<4HLLH", data, ofs)
+        (
+        self.thisDiskId,
+        self.dirDiskIdStart,
+        self.thisDiskNrEntries,
+        self.totalNrEntries,
+        self.dirSize,
+        self.dirOffset,
+        self.commentLength,
+        )= struct.unpack_from("<4HLLH", data, ofs)
         ofs += self.HeaderSize
 
         self.commentOffset = baseofs + ofs
@@ -470,8 +621,11 @@ class DataDescriptor(EntryBase):
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
 
-        self.crc, self.compSize, self.uncompSize = \
-            struct.unpack_from("<3L", data, ofs)
+        (
+            self.crc,
+            self.compSize,
+            self.uncompSize,
+        ) = struct.unpack_from("<3L", data, ofs)
         ofs += self.HeaderSize
 
         self.endOffset = baseofs + ofs
@@ -588,7 +742,7 @@ class Zip64EndOfDirLocator(EntryBase):
     def reprPretty(self):
         r = "PK.0607: %s\n" % self.__class__.__name__
         r += "\tEOD64 disk number: %04x\n" % self.eodDiskId
-        r += "\tEOD64 offset:      %010x\n" % self.EODOffset
+        r += "\tEOD64 offset:      %010x\n" % self.eodOffset
         r += "\tEOD64 total disks: %04x\n" % self.nrOfDisks
         return r
 
@@ -622,9 +776,9 @@ class SingleSpannedArchiveMarker(EntryBase):
         self.pkOffset = baseofs + ofs - 4
         self.endOffset = self.pkOffset + 4
     def __repr__(self):
-        return "PK.3030"
+        return "PK.0708"
     def reprPretty(self):
-        r = "PK.3030: %s\n" % self.__class__.__name__
+        r = "PK.0708: %s\n" % self.__class__.__name__
         return r
 
 class SpannedArchiveMarker(EntryBase):
@@ -684,6 +838,15 @@ def findPKHeaders(args, fh):
             n = chunk.find(b'PK', n+1)
             if n == -1 or n+4 > len(chunk):
                 break
+
+            # first try markers, which are followed immediately by another PK tag.
+            if n+8 <= len(chunk) and chunk[n+4:n+6] == b'PK' and getDecoderClass(chunk[n+6:n+8]):
+                cls = getMarkerClass(chunk[n+2:n+4])
+                if cls:
+                    yield cls(o, chunk, n+4)
+                    continue
+
+            # then try the regular PK tags.
             cls = getDecoderClass(chunk[n+2:n+4])
             if cls:
                 hdrEnd = n+4+cls.HeaderSize
@@ -695,10 +858,6 @@ def findPKHeaders(args, fh):
                 #    continue
 
                 yield cls(o, chunk, n+4)
-            elif n+10 <= len(chunk):
-                if chunk[n+6:n+8] == b'PK' and getDecoderClass(chunk[n+8:n+10]):
-                    cls = getMarkerClass(chunk[n+2:n+4])
-                    yield cls(o, chunk, n+4)
 
     prev = b''
     o = 0
@@ -760,14 +919,10 @@ def quickScanZip(args, fh):
 
     if eod.dirOffset != 0xFFFFFFFF:
         if eod.dirOffset + eod.dirSize < eod.pkOffset:
+            print("dir=%x, size=%x, pk=%x, end=%x" % (eod.dirOffset, eod.dirSize, eod.pkOffset, eod.endOffset))
             print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
         elif eod.dirOffset + eod.dirSize > eod.pkOffset:
             print("Strange: directory overlaps with the EOD marker by %d bytes" % ((eod.dirOffset + eod.dirSize) - eod.pkOffset))
-
-    if eod.endOffset < filesize:
-        print("Extra data after EOD marker: 0x%x bytes" % (filesize - eod.endOffset))
-    elif eod.endOffset > filesize:
-        print("Strange: EOD marker after EOF: 0x%x" % (eod.endOffset - filesize))
 
     # we found 'eod32.pkOffset'
     #   when eod32.cdir_ofs != -1
@@ -778,12 +933,9 @@ def quickScanZip(args, fh):
     #    loc64.pkOffset = eod32.pkOffset - 20
     #    loc64.eod_ofs  is only useful when we assume 0 extra bytes before the file.
     #    eod64.pkOffset - eod64.cdir_size == eod64.cdir_ofs
-    if eod.dirOffset == 0xFFFFFFFF:
         #print("o=%x, i=%x : %s" % (ofs, iEND, binascii.b2a_hex(eoddata)))
 
-        if eoddata[iEND-20:iEND-16] != b'PK'+Zip64EndOfDirLocator.MagicNumber:
-            print("WARNING: did not find zip64 locator - %s" % binascii.b2a_hex(eoddata[iEND-20:iEND-16]))
-            return
+    if eoddata[iEND-20:iEND-16] == b'PK'+Zip64EndOfDirLocator.MagicNumber:
         loc64 = Zip64EndOfDirLocator(ofs, eoddata, iEND-20+4)
         yield loc64
 
@@ -803,6 +955,15 @@ def quickScanZip(args, fh):
 
         eod = Zip64EndOfDir(ofs, eoddata, endofs+4)
         yield eod
+    elif eod.dirOffset == 0xFFFFFFFF:
+        print("WARNING: did not find zip64 locator - %s" % binascii.b2a_hex(eoddata[iEND-20:iEND-16]))
+        return
+
+    if eod.endOffset < filesize:
+        print("Extra data after EOD marker: 0x%x bytes" % (filesize - eod.endOffset))
+    elif eod.endOffset > filesize:
+        print("Strange: EOD marker after EOF: 0x%x" % (eod.endOffset - filesize))
+
 
     dirofs = eod.pkOffset - eod.dirSize
     for _ in range(eod.thisDiskNrEntries):
