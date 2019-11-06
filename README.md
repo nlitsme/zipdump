@@ -68,5 +68,10 @@ TODO
    multiple files in one command.
 
 
+HISTORY
+=======
+
+This tool started out as a perl script named zipdbg in 2003.
+
 
 (c) 2016 Willem Hengeveld <itsme@xs4all.nl>
