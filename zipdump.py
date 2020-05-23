@@ -507,10 +507,10 @@ class LocalFileHeader(FileEntryBase):
 
 
     def __repr__(self):
-        r = "PK.0304: %04x %04x %04x %08x %08x %08x %08x %04x %04x |  %08x %08x %08x %08x" % (
+        r = "PK.0304: %04x %04x %04x %08x %08x %08x %08x %04x %04x |  %08x %08x %08x %s" % (
             self.neededVersion, self.flags, self.method, self.timestamp, self.crc32,
             self.compressedSize, self.originalSize, self.nameLength, self.extraLength,
-            self.nameOffset, self.extraOffset, self.dataOffset, self.endOffset)
+            self.nameOffset, self.extraOffset, self.dataOffset, "%08x" % self.endOffset if self.compressedSize!=0xFFFFFFFF else "--------")
         if self.name:
             r += " - " + self.name
         return r
@@ -901,7 +901,7 @@ def quickScanZip(args, fh):
     fh.seek(ofs, os.SEEK_END)
     eoddata = fh.read()
 
-    iEND = eoddata.find(b'PK'+EndOfCentralDir.MagicNumber)
+    iEND = eoddata.rfind(b'PK'+EndOfCentralDir.MagicNumber)
     if iEND==-1:
         # try with larger chunk
         # 0x10000 + 0x200 = max eod + filecomment + zip64 locator size
@@ -909,7 +909,7 @@ def quickScanZip(args, fh):
         fh.seek(ofs, os.SEEK_SET)
         eoddata = fh.read()
 
-        iEND = eoddata.find(b'PK'+EndOfCentralDir.MagicNumber)
+        iEND = eoddata.rfind(b'PK'+EndOfCentralDir.MagicNumber)
         if iEND==-1:
             print("expected PK0506 - probably not a PKZIP file")
             return
@@ -923,6 +923,11 @@ def quickScanZip(args, fh):
             print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
         elif eod.dirOffset + eod.dirSize > eod.pkOffset:
             print("Strange: directory overlaps with the EOD marker by %d bytes" % ((eod.dirOffset + eod.dirSize) - eod.pkOffset))
+
+    if eod.endOffset < filesize:
+        print("Extra data after EOD marker: 0x%x bytes" % (filesize - eod.endOffset))
+    elif eod.endOffset > filesize:
+        print("Strange: EOD marker after EOF: 0x%x" % (eod.endOffset - filesize))
 
     # we found 'eod32.pkOffset'
     #   when eod32.cdir_ofs != -1
@@ -958,11 +963,6 @@ def quickScanZip(args, fh):
     elif eod.dirOffset == 0xFFFFFFFF:
         print("WARNING: did not find zip64 locator - %s" % binascii.b2a_hex(eoddata[iEND-20:iEND-16]))
         return
-
-    if eod.endOffset < filesize:
-        print("Extra data after EOD marker: 0x%x bytes" % (filesize - eod.endOffset))
-    elif eod.endOffset > filesize:
-        print("Strange: EOD marker after EOF: 0x%x" % (eod.endOffset - filesize))
 
 
     dirofs = eod.pkOffset - eod.dirSize
@@ -1096,6 +1096,7 @@ def processfile(args, fh):
                 do_save= checkarg(args.save, ent)
 
                 if do_cat or do_raw:
+                    # TODO: add option to omit this line, so i can pipe directly to another tool.
                     print("\n===> " + ent.name + " <===\n")
 
                 sys.stdout.flush()
