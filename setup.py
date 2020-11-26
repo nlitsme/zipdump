@@ -14,10 +14,11 @@ setup(name=name,
     classifiers=[
         "Programming Language :: Python",
     ],
-    packages=['.'],
+    py_modules = [ 'urlstream', 'zipdump', 'webdump' ],
     zip_safe=False,
     entry_points="""
         [console_scripts]
         zipdump = zipdump:main
+        webdump = webdump:main
     """,
 )
