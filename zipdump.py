@@ -950,8 +950,9 @@ def quickScanZip(args, fh):
 
     if eod.dirOffset != 0xFFFFFFFF:
         if eod.dirOffset + eod.dirSize < eod.pkOffset:
-            print("dir=%x, size=%x, pk=%x, end=%x" % (eod.dirOffset, eod.dirSize, eod.pkOffset, eod.endOffset))
+            #print("dir=%x, size=%x, pk=%x, end=%x" % (eod.dirOffset, eod.dirSize, eod.pkOffset, eod.endOffset))
             print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
+            args.offset = eod.pkOffset - (eod.dirOffset + eod.dirSize)
         elif eod.dirOffset + eod.dirSize > eod.pkOffset:
             print("Strange: directory overlaps with the EOD marker by %d bytes" % ((eod.dirOffset + eod.dirSize) - eod.pkOffset))
 
@@ -1009,16 +1010,16 @@ def quickScanZip(args, fh):
         dirofs = dirent.endOffset
 
 
-def zipraw(fh, ent):
+def zipraw(fh, pkbaseofs, ent):
     """
     yields the raw data blocks for a file entry.
     """
     if isinstance(ent, CentralDirEntry):
         # find LocalFileHeader
-        fh.seek(ent.dataOfs)
+        fh.seek(pkbaseofs + ent.dataOfs)
         data = fh.read(4+LocalFileHeader.HeaderSize)
         dirent = ent
-        ent = LocalFileHeader(ent.dataOfs, data, 4)
+        ent = LocalFileHeader(pkbaseofs + ent.dataOfs, data, 4)
 
         ent.loaditems(fh)
 
@@ -1143,13 +1144,13 @@ def processfile(args, fh):
                 do_raw = checkarg(args.raw, ent)
                 do_save= checkarg(args.save, ent)
 
-                if do_cat or do_raw:
+                if (do_cat or do_raw) and not args.quiet:
                     # TODO: add option to omit this line, so i can pipe directly to another tool.
                     print("\n===> " + ent.name + " <===\n")
 
                 sys.stdout.flush()
 
-                blks = zipraw(fh, ent)   # note that this is a generator.
+                blks = zipraw(fh, args.offset, ent)   # note that this is a generator.
 
                 if args.password and ent.flags&1:
                     blks = zip_decrypt(blks, args.password)
