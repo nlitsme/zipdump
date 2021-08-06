@@ -2,7 +2,7 @@ from setuptools import setup
 
 
 name = 'zipdump'
-version = '0.2'
+version = '0.3'
 
 
 setup(name=name,
