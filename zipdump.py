@@ -347,7 +347,7 @@ class FileEntryBase(EntryBase):
             o += 8
 
     def getOriginalSize(self):
-        return self.originalSize64 or rself.originalSize
+        return self.originalSize64 or self.originalSize
 
     def getCompressedSize(self):
         return self.compressedSize64 or self.compressedSize
@@ -410,8 +410,8 @@ class CentralDirEntry(FileEntryBase):
 
     def summary(self):
         return "%10d (%5.1f%%)  %s  %08x [%5s] %s" % (
-                self.originalSize,
-                100.0*self.compressedSize/self.originalSize if self.originalSize else 0,
+                self.getOriginalSize(),
+                100.0*self.getCompressedSize()/self.getOriginalSize() if self.getOriginalSize() else 0,
                 self.decodedatetime(self.timestamp),
                 self.crc32,
                 self.flagdesc(simple=True),
