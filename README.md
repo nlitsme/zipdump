@@ -59,6 +59,7 @@ TODO
 ====
 
  * add option to save a specific entry by index, or offset into the file.
+     * this would be useful when an archive contains an entry with a difficult to type name.
  * add option to save an entry by name to a differently named file.
  * by default sanitize filenames before use, with option to disable sanitation.
  * currently XTRA is printed only when specifying --dumpraw, i would like to see this
@@ -66,6 +67,9 @@ TODO
  * rename pretty to 'very verbose'
  * add option to save each file to a zipfile specific subdirectory. So you can extract
    multiple files in one command.
+ * support stdin
+ * as library: add better interface, which allows enumeration of contents, lookup of files, extraction of files.
+
 
 
 HISTORY
