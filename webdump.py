@@ -1,3 +1,4 @@
+# a tool for hexdumping a section of a large online file.
 from __future__ import division, print_function, absolute_import, unicode_literals
 
 import urlstream
