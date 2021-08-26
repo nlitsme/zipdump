@@ -1,17 +1,12 @@
 #!/usr/local/bin/python3
 """
-Analyze PKZIP file contents
+Analyze local or remote PKZIP file contents
 
  * scan entire file for PKxy headers
- * do quick scan by locating EOF header
+ * do quick scan by locating EOF header ( with the '-q' option )
  * can operate on .zip files from a http://URL
 
 (C) 2016 Willem Hengeveld  <itsme@xs4all.nl>
-
-
-TODO:
- - support stdin
- - as library: add better interface, which allows enumeration of contents, lookup of files, extraction of files.
 
 """
 
