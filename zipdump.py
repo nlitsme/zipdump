@@ -947,14 +947,6 @@ def quickScanZip(args, fh):
     eod = EndOfCentralDir(ofs, eoddata, iEND+4)
     yield eod
 
-    if eod.dirOffset != 0xFFFFFFFF:
-        if eod.dirOffset + eod.dirSize < eod.pkOffset:
-            #print("dir=%x, size=%x, pk=%x, end=%x" % (eod.dirOffset, eod.dirSize, eod.pkOffset, eod.endOffset))
-            print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
-            args.offset = eod.pkOffset - (eod.dirOffset + eod.dirSize)
-        elif eod.dirOffset + eod.dirSize > eod.pkOffset:
-            print("Strange: directory overlaps with the EOD marker by %d bytes" % ((eod.dirOffset + eod.dirSize) - eod.pkOffset))
-
     if eod.endOffset < filesize:
         print("Extra data after EOD marker: 0x%x bytes" % (filesize - eod.endOffset))
     elif eod.endOffset > filesize:
@@ -995,6 +987,13 @@ def quickScanZip(args, fh):
         print("WARNING: did not find zip64 locator - %s" % binascii.b2a_hex(eoddata[iEND-20:iEND-16]))
         return
 
+    if eod.dirOffset != 0xFFFFFFFF:
+        if eod.dirOffset + eod.dirSize < eod.pkOffset:
+            #print("dir=%x, size=%x, pk=%x, end=%x" % (eod.dirOffset, eod.dirSize, eod.pkOffset, eod.endOffset))
+            print("Extra data before the start of the file: 0x%x bytes" % (eod.pkOffset - (eod.dirOffset + eod.dirSize)))
+            args.offset = eod.pkOffset - (eod.dirOffset + eod.dirSize)
+        elif eod.dirOffset + eod.dirSize > eod.pkOffset:
+            print("Strange: directory overlaps with the EOD marker by %d bytes" % ((eod.dirOffset + eod.dirSize) - eod.pkOffset))
 
     dirofs = eod.pkOffset - eod.dirSize
     for _ in range(eod.thisDiskNrEntries):
