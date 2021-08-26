@@ -342,10 +342,14 @@ class FileEntryBase(EntryBase):
             o += 8
 
     def getOriginalSize(self):
-        return self.originalSize64 or self.originalSize
+        if self.originalSize64 is not None:
+            return self.originalSize64
+        return self.originalSize
 
     def getCompressedSize(self):
-        return self.compressedSize64 or self.compressedSize
+        if self.compressedSize64 is not None:
+            return self.compressedSize64
+        return self.compressedSize
 
 
 class CentralDirEntry(FileEntryBase):
