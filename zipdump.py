@@ -117,7 +117,10 @@ class EntryBase(object):
 
     @staticmethod
     def decode_name(name):
-        nonprint = set('\u0009\u000b\u000c\u001c\u001d\u001e\u001f\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2008\u2009\u200a\u2028\u2029\u205f\u3000')
+        """
+        create an always somewhat readable name, without
+        """
+        nonprint = set('\u0009\u000b\u000c\u001c\u001d\u001e\u001f\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2008\u2009\u200a\u200b\u2026\u2028\u2029\u205f\u3000')
         try:
             utf8 = name.decode('utf-8', 'strict')
             if not nonprint & set(utf8) and utf8.isprintable():
@@ -128,6 +131,9 @@ class EntryBase(object):
 
     @staticmethod
     def decodedatetime(ts):
+        """
+        Decode a pkzip / dos date + time into a datetime object.
+        """
         def decode_date(dt):
             if dt==0:
                 return datetime.datetime(1980,1,1)
