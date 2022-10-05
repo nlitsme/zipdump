@@ -35,12 +35,16 @@ Request.urlopen = urllib2.urlopen
 # set this to True when debugging this module
 debuglog = False
 
-def open(url, mode=None):
+def open(url, mode=None, trace=False):
     """
     Use urlstream.open for doing a simple request, without customizing request headers
 
     'mode' is ignored, it is there to be argument compatible with file.open()
     """
+
+    handlers = []
+    if trace:
+        handlers.append(urllib.request.HTTPSHandler(debuglevel=1))
 
     # support basic http authentication
     m = re.match(r'(\w+://)([^/]+?)(?::([^/]+))?@(.*)', url)
@@ -48,7 +52,11 @@ def open(url, mode=None):
         url = m.group(1)+m.group(4)
         authinfo = urllib2.HTTPPasswordMgrWithDefaultRealm()
         authinfo.add_password(None, url, m.group(2), m.group(3))
-        urllib2.install_opener(urllib2.build_opener(urllib2.HTTPBasicAuthHandler(authinfo)))
+        handlers.append(
+            urllib2.HTTPBasicAuthHandler(authinfo)
+        )
+    if handlers:
+        urllib2.install_opener(urllib2.build_opener(*handlers))
 
     # todo: only re-encode when the url does not have '%xx' chars in it.
     m = re.match(r'^(\S+?://)(.*?)(\?.*)?$', url)
@@ -176,6 +184,7 @@ class urlstream(object):
         if self.buffer and not self.bufferstart <= self.absolutepos < self.bufferstart+len(self.buffer):
             self.buffer = None
             self.bufferstart = None
+        return self.absolutepos
 
     def tell(self):
         """ Return the current absolute position. """
