@@ -1,4 +1,4 @@
-#!/usr/local/bin/python3
+#!/usr/bin/python3
 """
 Analyze local or remote PKZIP file contents
 
@@ -357,6 +357,14 @@ class FileEntryBase(EntryBase):
             return self.compressedSize64
         return self.compressedSize
 
+"""
+note about version-made-by:
+    0 = FAT
+    1 = amiga, 2=openvms, 3=unix, 4=vm/cms
+    5 = atarist, 6=hpfs, 7=mac, 8=z-sys, 9=cpm
+    10= ntfs, 11=ntfs
+    14= vfat, 16=beos
+"""
 
 class CentralDirEntry(FileEntryBase):
     HeaderSize = 42
@@ -473,7 +481,32 @@ class CentralDirEntry(FileEntryBase):
         # lower 16 bits: 0 for regular, 16 for directory
         return (self.osAttrs & 65535) == 16
 
+"""
+Note about flags:
+       0 - encrypted
+       method 6 (imploding)
+           1  -> 0=4k dict, 1=8K dict
+           2  -> 0=2 trees, 1=3 trees
+       method 8, 9 (Deflating)
+         00 - normal
+         01 - max
+         10 - fast
+         11 - super
+       
+       3 - crc32, compsize, uncompsize are empty in LFH
+           see datadesc after the data.
+       5 - packed data
 
+note about method:
+    0 - stored
+    1 - shrunk
+    2-5 - reduced-1..4
+    6 - imploded
+    7 - tokenized
+    8 - deflated
+    9 - enhanced deflate
+   10 - pkware implode
+"""
 class LocalFileHeader(FileEntryBase):
     HeaderSize = 26
     MagicNumber = b'\x03\x04'
@@ -486,7 +519,7 @@ class LocalFileHeader(FileEntryBase):
 
         (
             self.neededVersion,
-            self.flags,
+            self.flags,           # bit3: have datadesc
             self.method,
             self.timestamp,
             self.crc32,
@@ -917,7 +950,11 @@ def findPKHeaders(args, fh):
 
 
 def quickScanZip(args, fh):
-    """ Do a quick scan of the .zip file, starting by locating the EOD marker. """
+    """
+    Do a quick scan of the .zip file, starting by locating the EOD marker.
+
+    args.offset can be updated by this funtion.
+    """
     # 100 bytes is the smallest .zip possible
 
     fh.seek(0, os.SEEK_END)
@@ -1014,10 +1051,11 @@ def quickScanZip(args, fh):
         dirofs = dirent.endOffset
 
 
-def zipraw(fh, pkbaseofs, ent):
-    """
-    yields the raw data blocks for a file entry.
-    """
+def findentry(entries):
+    for ent in entries:
+        pass
+
+def getLFH(fh, pkbaseofs, ent):
     if isinstance(ent, CentralDirEntry):
         # find LocalFileHeader
         fh.seek(pkbaseofs + ent.dataOfs)
@@ -1027,10 +1065,20 @@ def zipraw(fh, pkbaseofs, ent):
 
         ent.loaditems(fh)
 
-    fh.seek(ent.dataOffset)
+    return ent
+
+
+def zipraw(fh, pkbaseofs, ent):
+    """
+    yields the raw data blocks for a file entry.
+    """
+    lfh = getLFH(fh, pkbaseofs, ent)
+    compsize = lfh.getCompressedSize() or ent.getCompressedSize()
+
+    fh.seek(lfh.dataOffset)
     nread = 0
-    while nread < ent.getCompressedSize():
-        want = min(ent.getCompressedSize()-nread, 0x10000)
+    while nread < compsize:
+        want = min(compsize-nread, 0x10000)
         block = fh.read(want)
         if len(block)==0:
             break
@@ -1061,6 +1109,8 @@ def blockdump(baseofs, blks, limit):
 def zipcat(blks, ent):
     """
     Generator which decompresses data from the `blks` generator.
+    8 = zip
+    0 = stored
     """
     if ent.method==8:
         C = zlib.decompressobj(-15)
@@ -1154,7 +1204,7 @@ def processfile(args, fh):
 
                 sys.stdout.flush()
 
-                blks = zipraw(fh, args.offset, ent)   # note that this is a generator.
+                blks = zipraw(fh, args.offset or 0, ent)   # note that this is a generator.
 
                 if args.password and ent.flags&1:
                     blks = zip_decrypt(blks, args.password)
@@ -1266,6 +1316,7 @@ def main():
     parser.add_argument('--verbose', '-v', action='count')
     parser.add_argument('--quiet', action='store_true')
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--httptrace', action='store_true')
     parser.add_argument('--cat', '-c', type=str, action=MultipleOptions, help='decompress file to stdout')
     parser.add_argument('--raw', '-p', type=str, action=MultipleOptions, help='print raw compressed file data to stdout')
     parser.add_argument('--save', '-s', type=str, action=MultipleOptions, help='extract file to the output directory')
@@ -1311,7 +1362,10 @@ def main():
                 if fn.find("://") in (3,4,5):
                     # when argument looks like a url, use urlstream to open
                     import urlstream
-                    with urlstream.open(fn) as fh:
+                    if args.httptrace:
+                        urlstream.debuglog = True
+
+                    with urlstream.open(fn, trace=args.httptrace) as fh:
                         processfile(args, fh)
                 else:
                     with open(fn, "rb") as fh:
