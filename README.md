@@ -36,6 +36,9 @@ COMMANDLINE OPTIONS
  * `--hexpassword  HEXPASSWD `  specify the password for decrypting encrypted files.
     useful when the password is not an ascii string.
 
+ * `-H` "HDR: value"   add custom http headers to the http request.
+ * `--httptrace`       print out all http traffic.
+
  * `--extract`         Extract all files to the `outputdir`, optionally stripping leading parts of the filename
    * `--strip STRIP`     strip N initial parts from pathnames before saving
    * `--preserve`        preserve permissions and timestamps
