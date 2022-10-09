@@ -1333,6 +1333,7 @@ def main():
     parser.add_argument('--pretty', action='store_true', help='make output easier to read')
     parser.add_argument('--dumpraw', action='store_true', help='hexdump raw compressed data')
     parser.add_argument('--limit', type=str, help='limit raw dump output')
+    parser.add_argument('--headers', '-H', type=str, help='Add custom http headers', action=MultipleOptions)
 
     parser.add_argument('--password', type=str, help="Password for pkzip decryption")
     parser.add_argument('--hexpassword', type=str, help="hexadecimal password for pkzip decryption")
@@ -1365,7 +1366,15 @@ def main():
                     if args.httptrace:
                         urlstream.debuglog = True
 
-                    with urlstream.open(fn, trace=args.httptrace) as fh:
+                    kwargs = {'trace':args.httptrace}
+                    if args.headers:
+                        hdrs = dict()
+                        for h in args.headers:
+                            k, v = h.split(':', 1)
+                            hdrs[k] = v
+                        kwargs['headers'] = hdrs
+
+                    with urlstream.open(fn, **kwargs) as fh:
                         processfile(args, fh)
                 else:
                     with open(fn, "rb") as fh:

@@ -35,7 +35,7 @@ Request.urlopen = urllib2.urlopen
 # set this to True when debugging this module
 debuglog = False
 
-def open(url, mode=None, trace=False):
+def open(url, mode=None, trace=False, headers=None):
     """
     Use urlstream.open for doing a simple request, without customizing request headers
 
@@ -66,7 +66,7 @@ def open(url, mode=None, trace=False):
     method = m.group(1)
     basepath = urllib2.quote(m.group(2))
     query = m.group(3) or ""
-    return urlstream(Request(method + basepath + query))
+    return urlstream(Request(method + basepath + query, headers=headers))
 
 
 class urlstream(object):
