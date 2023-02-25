@@ -42,6 +42,9 @@ def open(url, mode=None, trace=False, headers=None):
     'mode' is ignored, it is there to be argument compatible with file.open()
     """
 
+    if headers is None:
+        headers = {}
+
     handlers = []
     if trace:
         handlers.append(urllib.request.HTTPSHandler(debuglevel=1))
