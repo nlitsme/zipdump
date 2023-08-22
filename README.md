@@ -1,7 +1,7 @@
 # zipdump
 Analyze zipfile, either local, or from url
 
-`zipdump` can either do a full scan, finding all PK-like headers, or it can do a quick scan ( like the usual `zip -v` type output ).
+`zipdump` can either do a full zip analysis, finding all PK-like headers, or (default) it can do a quick scan ( like the usual `zip -v` type output ).
 
 `zipdump -q`  works equally quick on web based resources as on local files.
 This makes it quite easy to quickly investigate a large number of large .zip files without actually needing to download them.
@@ -26,7 +26,7 @@ COMMANDLINE OPTIONS
  * `--raw` FILENAME    will decrypt, but not decompress the specified filename to stdout
  * `--save` FILENAME   will save the decrypted, decompressed file to the output directory
  * `--outputdir` DIR   specify where to save extracted files.
- * `--quick`           will quickly scan a file, without investigating the entire file.
+ * `--analyze`         Detailed .zip analysis, finds all PKnnn chunks.
  * `--offset OFS --length SIZE`   specify a chunk of a file to investigate
     you can used this to list zip contents from a zip file embeded in another binary file.
  * `--dumpraw`         hexdump the entire zip file contents, optionally limiting the amount of data printed.
@@ -42,6 +42,7 @@ COMMANDLINE OPTIONS
  * `--extract`         Extract all files to the `outputdir`, optionally stripping leading parts of the filename
    * `--strip STRIP`     strip N initial parts from pathnames before saving
    * `--preserve`        preserve permissions and timestamps
+   * `--allowdotdot`     allow paths to walk outside of the output directory.
 
 When searching for .zip files, you can recurse and skip links using these options:
  * `--recurse`         recurse into directories
@@ -64,7 +65,7 @@ TODO
  * add option to save a specific entry by index, or offset into the file.
      * this would be useful when an archive contains an entry with a difficult to type name.
  * add option to save an entry by name to a differently named file.
- * by default sanitize filenames before use, with option to disable sanitation.
+ * DONE by default sanitize filenames before use, with option to disable sanitation.
  * currently XTRA is printed only when specifying --dumpraw, i would like to see this
    parsed and printed with --verbose.
  * rename pretty to 'very verbose'
