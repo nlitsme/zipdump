@@ -18,11 +18,19 @@ import struct
 import datetime
 import zlib
 import itertools
+import errno
 
 if sys.version_info[0] == 2:
     import scandir
     os.scandir = scandir.scandir
 
+def md5_hex(x):
+    import hashlib
+    if type(x) == str:
+        x = x.encode('utf-8')
+    h = hashlib.new('md5')
+    h.update(x)
+    return h.hexdigest()
 
 def zip_decrypt(data, pw):
     """
@@ -127,7 +135,9 @@ class EntryBase(object):
                 return utf8
         except:
             pass
-        return "hex-%s" % binascii.b2a_hex(name)
+        if len(name)>255:
+            return "hex-%s" % md5_hex(name)
+        return "hex-%s" % (binascii.b2a_hex(name).decode())
 
     @staticmethod
     def decodedatetime(ts):
@@ -481,6 +491,12 @@ class CentralDirEntry(FileEntryBase):
         # lower 16 bits: 0 for regular, 16 for directory
         return (self.osAttrs & 65535) == 16
 
+    def islink(self):
+        # for unix: upper 16 bits contain file perms.
+        # lower 16 bits: 0 for regular, 16 for directory
+        return (self.osAttrs >> 16) & 0o170000 == 0o120000 
+
+
 """
 Note about flags:
        0 - encrypted
@@ -600,6 +616,10 @@ class LocalFileHeader(FileEntryBase):
     def isdir(self):
         # determine if this is an entry for a directory heuristically
         return self.crc32 == 0 and self.name.endswith('/')
+
+    def islink(self):
+        # actually, from the local file ent there is no way to tell if this is a link or a file.
+        return False
 
 
 class EndOfCentralDir(EntryBase):
@@ -1141,18 +1161,74 @@ def namegenerator(name):
     for i in itertools.count(1):
         yield "%s-%d%s" % (part0, i, part1)
 
+def is_subdir(basedir, path):
+    """
+    Make sure path is within basedir
+    """
+
+    # note: realpath expands any symlinks.
+    absbase = os.path.realpath(basedir)
+    abspath = os.path.realpath(path)
+    return absbase == os.path.commonpath([absbase, abspath])
+
+def ensure_dirs(dirpath):
+    cur = '/' if os.path.isabs(dirpath) else None
+    for p in dirpath.split('/'):
+        if cur is None:
+            todo = p
+        else:
+            todo = os.path.join(cur, p)
+        for _ in range(2):
+            try:
+                os.stat(todo)
+            except OSError as e:
+                # optionally update p
+                if e.errno == errno.ENAMETOOLONG :
+                    p = md5_hex(p.encode('utf-8'))
+                elif e.errno == errno.ENOENT:
+                    os.mkdir(todo)
+                else:
+                    raise e
+            break
+
+        if cur is None:
+            cur = p
+        else:
+            cur = os.path.join(cur, p)
+
+    return cur
 
 def savefile(args, ent, name, data):
     """
     Saves all data from the `data` generator to the specified file.
     """
-    os.makedirs(os.path.dirname(os.path.join(args.outputdir, name)), exist_ok=True)
+    fullpath = os.path.join(args.outputdir, name)
+
+    if not is_subdir(args.outputdir, fullpath):
+        if args.debug or not args.allowdotdot:
+            raise Exception("path tries to escape outputdir")
+        print("WARNING: path tries to escape outputdir: ", fullpath)
+
+    # todo: handle too-long basedir path components.
+    ensure_dirs(os.path.dirname(fullpath))
     for namei in namegenerator(name):
+        if len(namei)>255:
+            namei = md5_hex(namei)
         path = os.path.join(args.outputdir, namei)
         if not os.path.exists(path):
             break
-    with open(path, "wb") as fh:
-        fh.writelines(data)
+    try:
+        if ent.islink():
+            os.symlink(b"".join(data).decode('utf-8'), path)
+        else:
+            with open(path, "wb") as fh:
+                fh.writelines(data)
+    except OSError as e:
+        if args.debug:
+            raise
+        print("WARNING: %s" % e)
+        return
+
     if args.preserve and ent.havetimes():
         os.utime(path, (ent.get_atime(), ent.get_mtime()))
     if args.preserve and ent.havemode():
@@ -1166,10 +1242,10 @@ def getbytes(fh, ofs, size):
 
 def processfile(args, fh):
     """ Process one opened file / url. """
-    if args.quick:
-        scanner = quickScanZip(args, fh)
-    else:
+    if args.analyze:
         scanner = findPKHeaders(args, fh)
+    else:
+        scanner = quickScanZip(args, fh)
 
     def checkarg(arglist, ent):
         """
@@ -1191,8 +1267,8 @@ def processfile(args, fh):
             #  --> some problems with this: sometimes the lfh has only dummy values.
             #  and the lfh does not know if it is a directory.
             #
-            if args.quick and isinstance(ent, CentralDirEntry)  or \
-                        not args.quick and isinstance(ent, LocalFileHeader):
+            if not args.analyze and isinstance(ent, CentralDirEntry)  or \
+                        args.analyze and isinstance(ent, LocalFileHeader):
                 ent.loaditems(fh)
                 do_cat = checkarg(args.cat, ent)
                 do_raw = checkarg(args.raw, ent)
@@ -1228,7 +1304,7 @@ def processfile(args, fh):
             ent.loaditems(fh)
             if args.pretty:
                 print("%08x: %s" % (ent.pkOffset, ent.reprPretty()))
-            elif args.verbose or not args.quick:
+            elif args.verbose or args.analyze:
                 print("%08x: %s" % (ent.pkOffset, ent))
             else:
                 print(ent.summary())
@@ -1240,7 +1316,7 @@ def processfile(args, fh):
             if args.dumpraw and hasattr(ent, "comment") and ent.comment:
                 print("%08x: CMT: %s" % (ent.commentOffset, binascii.b2a_hex(getbytes(fh, ent.commentOffset, ent.commentLength))))
             if args.dumpraw and isinstance(ent, LocalFileHeader):
-                blks = zipraw(fh, ent)
+                blks = zipraw(fh, args.offset or 0, ent)
                 if args.password and ent.flags&1:
                     blks = list(blks)    # change generator into a list
                     blockdump(ent.dataOffset, blks, args.limit)
@@ -1323,10 +1399,11 @@ def main():
     parser.add_argument('--outputdir', '-d', type=str, help='the output directory, default = curdir', default='.')
     parser.add_argument('--extract', '-e', action='store_true', help='Extract all files')
     parser.add_argument('--strip', '-j', type=int, help='strip N initial parts from pathnames before saving')
-    parser.add_argument('--quick', '-q', action='store_true', help='Quick dir scan. This is quick with URLs as well.')
+    parser.add_argument('--analyze', action='store_true', help='Detailed .zip analysis, finds all PKnnn chunks.')
     parser.add_argument('--preserve', '-P',  action='store_true', help="preserve permissions and timestamps")
     parser.add_argument('--recurse', '-r', action='store_true', help='recurse into directories')
     parser.add_argument('--skiplinks', '-L', action='store_true', help='skip symbolic links')
+    parser.add_argument('--allowdotdot', action='store_true', help='allow paths to walk outside of output directory.')
     parser.add_argument('--offset', '-o', type=int, help='start processing at offset')
     parser.add_argument('--length', '-l', type=int, help='max length of data to process')
     parser.add_argument('--chunksize', type=int, default=1024*1024)
@@ -1341,8 +1418,6 @@ def main():
 
     parser.add_argument('FILES', type=str, nargs='*', help='Files or URLs')
     args = parser.parse_args()
-
-    use_raw = args.cat or args.raw or args.save
 
     if args.limit:
         args.limit = int(args.limit, 0)
@@ -1380,9 +1455,9 @@ def main():
                     with open(fn, "rb") as fh:
                         processfile(args, fh)
             except Exception as e:
-                print("ERROR: %s" % e)
                 if args.debug:
                     raise
+                print("WARNING: %s" % e)
     else:
         processfile(args, sys.stdin.buffer)
 
