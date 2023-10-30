@@ -73,7 +73,8 @@ TODO
    multiple files in one command.
  * support stdin
  * as library: add better interface, which allows enumeration of contents, lookup of files, extraction of files.
-
+ * add option to print only the filenames
+ * add option to filter what to extract.
 
 
 HISTORY
