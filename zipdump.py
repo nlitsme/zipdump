@@ -32,6 +32,24 @@ def md5_hex(x):
     h.update(x)
     return h.hexdigest()
 
+class DebugStream:
+    def __init__(self, fh):
+        self.fh = fh
+    def seek(self, ofs, whence = 0):
+        if ofs == 0xFFFFFFFF: raise Exception("BUG")
+        r = self.fh.seek(ofs, whence)
+        print("S: seek 0x%08x %d -> %s" % (ofs, whence, "None" if r is None else f"0x{r:08x}" ))
+        return r
+    def read(self, size=None):
+        r = self.fh.read(size)
+        print("S: read %s -> %s" % ("None" if size is None else f"0x{size:08x}",
+                                    "None" if r is None else f"(0x{len(r):08x})" ))
+        return r
+    def tell(self):
+        r = self.fh.tell()
+        print("S: tell -> %s" % ("None" if r is None else f"0x{r:08x}" ))
+        return r
+
 def zip_decrypt(data, pw):
     """
     INPUT: data  - an array of bytes
@@ -346,6 +364,7 @@ class FileEntryBase(EntryBase):
     def parseZip64(self, data):
         o = 0
         # zip64
+        # note: LFH must contain both, while the direntry may contain one or both.
         if self.originalSize == 0xFFFFFFFF:
             if o+8 > len(data):
                 print("WARNING: not enough data for origsize64")
@@ -356,16 +375,33 @@ class FileEntryBase(EntryBase):
                 print("WARNING: not enough data for compsize64")
             self.compressedSize64, = struct.unpack_from("<Q", data, o)
             o += 8
+        if hasattr(self, 'dataOfs') and self.dataOfs == 0xFFFFFFFF:
+            # only for centraldir.
+            if o+8 > len(data):
+                print("WARNING: not enough data for dataofs64")
+            self.dataOfs64, = struct.unpack_from("<Q", data, o)
+            o += 8
+
+        # disk start number
 
     def getOriginalSize(self):
+        # if flags&8 -> value is in data-descriptor(0708) and centraldir
         if self.originalSize64 is not None:
             return self.originalSize64
-        return self.originalSize
+        if isinstance(self, CentralDirEntry) or self.flags&8==0:
+            return self.originalSize
 
     def getCompressedSize(self):
+        # if flags&8 -> value is in data-descriptor(0708) and centraldir
         if self.compressedSize64 is not None:
             return self.compressedSize64
-        return self.compressedSize
+        if isinstance(self, CentralDirEntry) or self.flags&8==0:
+            return self.compressedSize
+
+    def getDataOfs(self):
+        if self.dataOfs64 is not None:
+            return self.dataOfs64
+        return self.dataOfs
 
 """
 note about version-made-by:
@@ -385,6 +421,7 @@ class CentralDirEntry(FileEntryBase):
 
         self.compressedSize64 = None
         self.originalSize64 = None
+        self.dataOfs64 = None
         # createVersion has the OS in the high byte, 0 = dos/win, 3 = unix
 
         (
@@ -442,6 +479,7 @@ class CentralDirEntry(FileEntryBase):
                 )
 
     def __repr__(self):
+        #             cver ver  fl   mth  ts  crc   csiz osiz nl   xl   cl   d0   zatr osat dofs
         r = "PK.0102: %04x %04x %04x %04x %08x %08x %08x %08x %04x %04x %04x %04x %04x %08x %08x |  %08x %08x %08x %08x" % (
             self.createVersion, self.neededVersion, self.flags, self.method, self.timestamp,
             self.crc32, self.compressedSize, self.originalSize, self.nameLength, self.extraLength,
@@ -553,9 +591,11 @@ class LocalFileHeader(FileEntryBase):
         ofs += self.extraLength
 
         self.dataOffset = baseofs + ofs
-        if self.compressedSize != 0xFFFFFFFF:
+        if self.compressedSize == 0xFFFFFFFF:
+            # Note: will fill these in later from the 'XTRA' field.
+            self.endOffset = None
+        elif self.flags&8==0:
             ofs += self.compressedSize      #### TODO unknown for zip64 until extra info is read.
-
             self.endOffset = baseofs + ofs
         else:
             self.endOffset = None
@@ -573,14 +613,19 @@ class LocalFileHeader(FileEntryBase):
 
         self.processExtra()
 
-        if self.compressedSize == 0xFFFFFFFF:
+        if self.endOffset is None and self.flags&8==0:
             self.endOffset = self.dataOffset + self.getCompressedSize()
 
     def __repr__(self):
+        def ornone(x):
+            if x is None: return "--------"
+            return "%08x" % x
+
+        #             ver  fl   mth  ts  crc   csiz osiz nlen xlen
         r = "PK.0304: %04x %04x %04x %08x %08x %08x %08x %04x %04x |  %08x %08x %08x %s" % (
             self.neededVersion, self.flags, self.method, self.timestamp, self.crc32,
             self.compressedSize, self.originalSize, self.nameLength, self.extraLength,
-            self.nameOffset, self.extraOffset, self.dataOffset, "%08x" % self.endOffset if self.compressedSize!=0xFFFFFFFF else "--------")
+            self.nameOffset, self.extraOffset, self.dataOffset, ornone(self.endOffset))
         if self.name:
             r += " - " + self.name
         return r
@@ -694,6 +739,8 @@ class DataDescriptor(EntryBase):
     MagicNumber = b'\x07\x08'
 
     # NOTE: conflict with disk spanning marker
+
+    # TODO: combine this and the LFH to get the sizes.
 
     def __init__(self, baseofs, data, ofs):
         self.pkOffset = baseofs + ofs - 4
@@ -1078,10 +1125,10 @@ def findentry(entries):
 def getLFH(fh, pkbaseofs, ent):
     if isinstance(ent, CentralDirEntry):
         # find LocalFileHeader
-        fh.seek(pkbaseofs + ent.dataOfs)
+        fh.seek(pkbaseofs + ent.getDataOfs())
         data = fh.read(4+LocalFileHeader.HeaderSize)
         dirent = ent
-        ent = LocalFileHeader(pkbaseofs + ent.dataOfs, data, 4)
+        ent = LocalFileHeader(pkbaseofs + ent.getDataOfs(), data, 4)
 
         ent.loaditems(fh)
 
@@ -1242,6 +1289,8 @@ def getbytes(fh, ofs, size):
 
 def processfile(args, fh):
     """ Process one opened file / url. """
+    if args.streamdebug:
+        fh = DebugStream(fh)
     if args.analyze:
         scanner = findPKHeaders(args, fh)
     else:
@@ -1311,9 +1360,9 @@ def processfile(args, fh):
                 if hasattr(ent, "comment") and ent.comment and not args.dumpraw:
                     print(ent.comment)
 
-            if args.dumpraw and hasattr(ent, "extraLength") and ent.extraLength:
+            if args.verbose>1 and hasattr(ent, "extraLength") and ent.extraLength:
                 print("%08x: XTRA: %s" % (ent.extraOffset, binascii.b2a_hex(getbytes(fh, ent.extraOffset, ent.extraLength))))
-            if args.dumpraw and hasattr(ent, "comment") and ent.comment:
+            if args.verbose>1 and hasattr(ent, "comment") and ent.comment:
                 print("%08x: CMT: %s" % (ent.commentOffset, binascii.b2a_hex(getbytes(fh, ent.commentOffset, ent.commentLength))))
             if args.dumpraw and isinstance(ent, LocalFileHeader):
                 blks = zipraw(fh, args.offset or 0, ent)
@@ -1389,10 +1438,11 @@ def main():
  
     parser = argparse.ArgumentParser(description='zipdump - scan file contents for PKZIP data',
                                      epilog='zipdump can quickly scan a zip from an URL without downloading the complete archive')
-    parser.add_argument('--verbose', '-v', action='count')
-    parser.add_argument('--quiet', action='store_true')
-    parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--httptrace', action='store_true')
+    parser.add_argument('--verbose', '-v', action='count', default=0, help='-v: print headers, -vv: print extra')
+    parser.add_argument('--quiet', '-q', action='store_true', help="don't print filenames")
+    parser.add_argument('--debug', action='store_true', help='print stacktrace and exit on exceptions')
+    parser.add_argument('--httptrace', action='store_true', help='print http requests and responses to stdout')
+    parser.add_argument('--streamdebug', action='store_true', help='debugging the (file|url)stream interface')
     parser.add_argument('--cat', '-c', type=str, action=MultipleOptions, help='decompress file to stdout')
     parser.add_argument('--raw', '-p', type=str, action=MultipleOptions, help='print raw compressed file data to stdout')
     parser.add_argument('--save', '-s', type=str, action=MultipleOptions, help='extract file to the output directory')
@@ -1404,9 +1454,10 @@ def main():
     parser.add_argument('--recurse', '-r', action='store_true', help='recurse into directories')
     parser.add_argument('--skiplinks', '-L', action='store_true', help='skip symbolic links')
     parser.add_argument('--allowdotdot', action='store_true', help='allow paths to walk outside of output directory.')
-    parser.add_argument('--offset', '-o', type=int, help='start processing at offset')
-    parser.add_argument('--length', '-l', type=int, help='max length of data to process')
-    parser.add_argument('--chunksize', type=int, default=1024*1024)
+
+    parser.add_argument('--offset', '-o', type=str, help='start processing at offset')
+    parser.add_argument('--length', '-l', type=str, help='max length of data to process')
+    parser.add_argument('--chunksize', type=str, default="0x100000")
     parser.add_argument('--pretty', action='store_true', help='make output easier to read')
     parser.add_argument('--dumpraw', action='store_true', help='hexdump raw compressed data')
     parser.add_argument('--limit', type=str, help='limit raw dump output')
@@ -1418,6 +1469,10 @@ def main():
 
     parser.add_argument('FILES', type=str, nargs='*', help='Files or URLs')
     args = parser.parse_args()
+
+    if args.offset is not None: args.offset = int(args.offset, 0)
+    if args.length is not None: args.length = int(args.length, 0)
+    if args.chunksize is not None: args.chunksize = int(args.chunksize, 0)
 
     if args.limit:
         args.limit = int(args.limit, 0)
@@ -1437,7 +1492,13 @@ def main():
             try:
                 if fn.find("://") in (3,4,5):
                     # when argument looks like a url, use urlstream to open
-                    import urlstream
+                    try:
+                        # prefer urllib3 based version, this supports connection pooling.
+                        import urlstream3 as urlstream
+                    except ModuleNotFoundError:
+                        # fall back to urllib2 based version
+                        import urlstream
+
                     if args.httptrace:
                         urlstream.debuglog = True
 
