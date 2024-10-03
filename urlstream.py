@@ -17,6 +17,8 @@ import sys
 import re
 from errno import EINVAL, ENOENT
 from os import SEEK_SET, SEEK_CUR, SEEK_END
+
+# python2/python3 compatibility
 if sys.version_info[0] == 3:
     import urllib.request
     from urllib.request import Request
@@ -66,10 +68,10 @@ def open(url, mode=None, trace=False, headers=None):
     if not m:
         print("unrecognized url: %s" % url)
         return
-    method = m.group(1)
+    protocol = m.group(1)
     basepath = urllib2.quote(m.group(2))
     query = m.group(3) or ""
-    return urlstream(Request(method + basepath + query, headers=headers))
+    return urlstream(Request(protocol + basepath + query, headers=headers))
 
 
 class urlstream(object):
@@ -113,7 +115,7 @@ class urlstream(object):
 
         if debuglog: print("next: ", self.req.headers['Range'])
 
-        f = self.doreq()
+        f = self.doreq('GET')
         if debuglog:
             print(f.headers)
 
@@ -141,7 +143,7 @@ class urlstream(object):
             if self.absolutepos==0:
                 self.clearrange()
                 if debuglog: print("read: entire file")
-                f = self.doreq()
+                f = self.doreq('GET')
                 if debuglog:
                     print(f.headers)
                 return f.read()
@@ -195,47 +197,49 @@ class urlstream(object):
             if debuglog: print("tell -> ", self.absolutepos)
             return self.absolutepos
 
-        # note: with python3 i could have used the 'method' property
-        saved_method = self.req.get_method
-        self.req.get_method = lambda : 'HEAD'
-        if debuglog: print("tell: HEAD")
         self.clearrange()
 
-        try:
-            head_response = self.doreq()
-            if debuglog:
-                print(head_response.headers)
-            result = head_response.getcode()
-        except:
-            # restore get_method, irrespective of the type of error.
-            self.req.get_method = saved_method
-            raise
+        head_response = self.doreq('HEAD')
+        if debuglog:
+            print(head_response.headers)
 
-        self.req.get_method = saved_method
+        if "Content-Length" not in head_response.headers:
+            raise Exception("no content-length")
 
         self.contentLength = int(head_response.headers.get("Content-Length"))
 
         self.absolutepos += self.contentLength
         return self.absolutepos
 
-    def doreq(self):
+    def doreq(self, method):
         """
         Do the actual http request, translating 404 into ENOENT.
 
         returns a httplib.HTTPResponse object
         """
-        try:
-#            return urllib2.urlopen(self.req)
-            return self.req.urlopen()
-        except urllib2.HTTPError as err:
-            if err.code==404:
-                raise IOError(ENOENT, "Not found")
-            if err.code==416:
+        lasterr = None
+        self.req.get_method = lambda: method
+        for _ in range(4):
+            try:
+                return self.req.urlopen()
+            except ConnectionError as err:
                 if debuglog:
-                    print("status 416")
-                # outside of content range -> return empty
-                return err.fp
-            raise
+                    print("retrying", err)
+            except urllib2.HTTPError as err:
+                if err.code==404:
+                    raise IOError(ENOENT, "Not found")
+                if err.code==416:
+                    if debuglog:
+                        print("status 416")
+                    # outside of content range -> return empty
+                    return err.fp
+                raise
+            except urllib.error.URLError as err:
+                if debuglog:
+                    print("retrying", err)
+                lasterr = err
+
+        raise lasterr
 
     # for supporting 'with'
     def __enter__(self):
