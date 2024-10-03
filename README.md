@@ -66,7 +66,7 @@ TODO
      * this would be useful when an archive contains an entry with a difficult to type name.
  * add option to save an entry by name to a differently named file.
  * DONE by default sanitize filenames before use, with option to disable sanitation.
- * currently XTRA is printed only when specifying --dumpraw, i would like to see this
+ * DONE currently XTRA is printed only when specifying --dumpraw, i would like to see this
    parsed and printed with --verbose.
  * rename pretty to 'very verbose'
  * add option to save each file to a zipfile specific subdirectory. So you can extract
